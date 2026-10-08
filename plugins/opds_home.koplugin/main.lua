@@ -318,13 +318,25 @@ function OPDSHome:getOPDSBrowserClass()
     if self.OPDSBrowserClass then
         return self.OPDSBrowserClass
     end
+
+    -- The built-in OPDS plugin adds its directory to package.path only when
+    -- enabled. MediaCat can reuse its browser modules without enabling its UI.
+    local source_path = debug.getinfo(1, "S").source:match("^@(.+)$")
+    local plugins_dir = source_path and source_path:match("^(.*)/[^/]+/[^/]+$")
+    if plugins_dir then
+        local opds_plugin_path = plugins_dir .. "/opds.koplugin/?.lua"
+        if not package.path:find(opds_plugin_path, 1, true) then
+            package.path = opds_plugin_path .. ";" .. package.path
+        end
+    end
+
     local ok, class = pcall(require, "opdsbrowser")
     if ok then
         self.OPDSBrowserClass = class
         return class
     end
     UIManager:show(InfoMessage:new{
-        text = _("OPDS Home needs KOReader's built-in OPDS plugin enabled. OPDS Plus has its own separate browser."),
+        text = _("MediaCat could not load KOReader's built-in OPDS browser modules."),
     })
 end
 
@@ -435,7 +447,7 @@ function OPDSHome:showLogin()
     local values = self.login_values or self.saved_connection or {}
     local dialog
     dialog = MultiInputDialog:new{
-        title = _("OPDS Home — Login"),
+        title = _("MediaCat — Login"),
         fields = {
             { hint = _("OPDS URL"), text = values.url or "" },
             { hint = _("Username"), text = values.username or "" },
