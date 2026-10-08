@@ -34,6 +34,10 @@ The passwordless SSH option allows logins from devices on the local network whil
 
 To remove OPDS Home, disable it in Plugin management or delete `opds_home.koplugin`, then restart KOReader.
 
+### Redeploy from a source checkout
+
+From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It syncs the plugin and the OPDS error-reporting change to `root@192.168.0.58:2222`, under `/mnt/us/koreader`. For password authentication, install `sshpass`; the script prompts at run time and does not store the password. Otherwise, press Enter to use your SSH key or the Kindle's enabled passwordless-login setting. Set `KINDLE_HOST`, `KINDLE_PORT`, `KINDLE_USER`, or `KINDLE_KOREADER_DIR` to override those defaults. Restart KOReader after deployment.
+
 ## Try it
 
 1. On the FileManager screen, enter the root OPDS feed URL. Add a username and password if your server requires them.
