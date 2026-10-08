@@ -8,6 +8,7 @@ kindle_host="${KINDLE_HOST:-192.168.0.58}"
 kindle_port="${KINDLE_PORT:-2222}"
 kindle_user="${KINDLE_USER:-root}"
 koreader_dir="${KINDLE_KOREADER_DIR:-/mnt/us/koreader}"
+kindle_key="${KINDLE_SSH_KEY:-$HOME/.ssh/id_ed25519_koreader_kindle}"
 
 if ! command -v sftp >/dev/null 2>&1; then
     echo "sftp is required (install OpenSSH client tools)." >&2
@@ -55,13 +56,17 @@ trap 'rm -f "$batch_file"' EXIT
 printf 'Syncing OPDS Home to %s@%s:%s over SFTP port %s\n' \
     "$kindle_user" "$kindle_host" "$koreader_dir" "$kindle_port"
 kindle_password="${KINDLE_PASSWORD:-}"
-if [[ -z "$kindle_password" && -r /dev/tty ]] && command -v sshpass >/dev/null 2>&1; then
+if [[ -z "$kindle_password" && ! -f "$kindle_key" && -r /dev/tty ]] && command -v sshpass >/dev/null 2>&1; then
     read -r -s -p "Kindle SSH password (press Enter for key/passwordless login): " \
         kindle_password </dev/tty
     printf '\n' >/dev/tty
 fi
 
-sftp_args=(-P "$kindle_port" -oConnectTimeout=8 -b "$batch_file" "$kindle_user@$kindle_host")
+sftp_args=(-P "$kindle_port" -oConnectTimeout=8)
+if [[ -f "$kindle_key" ]]; then
+    sftp_args+=(-i "$kindle_key" -oIdentitiesOnly=yes)
+fi
+sftp_args+=(-b "$batch_file" "$kindle_user@$kindle_host")
 if [[ -n "$kindle_password" ]]; then
     if ! command -v sshpass >/dev/null 2>&1; then
         echo "sshpass is required for password authentication. Install it or use SSH key/passwordless login." >&2
