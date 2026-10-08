@@ -460,6 +460,7 @@ end
 
 -- Fetches feed from server
 function OPDSBrowser:fetchFeed(item_url, headers_only, extra_headers)
+    self.last_fetch_error = nil
     local sink = {}
     socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
     local request = {
@@ -515,6 +516,7 @@ function OPDSBrowser:fetchFeed(item_url, headers_only, extra_headers)
         text = text,
         icon = icon,
     })
+    self.last_fetch_error = text or status or code
     logger.dbg(string.format("OPDS: Failed to fetch catalog `%s`: %s", item_url, text))
 end
 
