@@ -296,7 +296,7 @@ function CoverGrid:onPageNext()
 end
 
 local OPDSHome = WidgetContainer:extend{
-    name = "opds_home",
+    name = "mediacat",
     is_doc_only = false,
     settings_file = DataStorage:getSettingsDir() .. "/opds_home.lua",
 }

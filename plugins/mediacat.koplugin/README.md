@@ -6,7 +6,7 @@ This is an early prototype. It covers the FileManager home screen; it does not c
 
 ## Install on a device
 
-1. Copy the whole `opds_home.koplugin` folder into the device's `koreader/plugins/` folder.
+1. Copy the whole `mediacat.koplugin` folder into the device's `koreader/plugins/` folder.
    - Kobo: `/.adds/koreader/plugins/`
    - Kindle: `koreader/plugins/` on the Kindle storage volume
    - Android: `koreader/plugins/` in KOReader's data folder
@@ -27,12 +27,12 @@ You can copy the plugin over Wi-Fi without connecting the Kindle by USB. The Kin
    - Port: `2222` (unless KOReader shows a different port)
    - Username: `root`
    - Password: `root`
-4. In the remote files, open the Kindle storage and then `koreader/plugins/`. On many Kindle setups the storage is `/mnt/us`; on this Kindle it is `/mnt/us/koreader/plugins/`. Some KOReader setups expose it as `/mnt/onboard/koreader/plugins/`. Copy the entire `opds_home.koplugin` folder there.
+4. In the remote files, open the Kindle storage and then `koreader/plugins/`. On many Kindle setups the storage is `/mnt/us`; on this Kindle it is `/mnt/us/koreader/plugins/`. Some KOReader setups expose it as `/mnt/onboard/koreader/plugins/`. Copy the entire `mediacat.koplugin` folder there.
 5. In KOReader, disable **SSH server** and **Login without password (DANGEROUS)** after the copy. Restart KOReader, then enable **MediaCat** in **Tools → More tools → Plugin management**.
 
 The passwordless SSH option allows logins from devices on the local network while it is enabled. Turn it off after transferring the plugin. For repeated development transfers, configure an SSH public key in KOReader instead of enabling passwordless login.
 
-To remove MediaCat, disable it in Plugin management or delete `opds_home.koplugin`, then restart KOReader.
+To remove MediaCat, disable it in Plugin management or delete `mediacat.koplugin`, then restart KOReader.
 
 ### Redeploy from a source checkout
 
@@ -46,7 +46,7 @@ From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It sy
 4. A feed with books and no child catalogs opens in a cover grid. Use the bottom **More** control for another feed page. Tap a book, then choose a supported format in KOReader's standard download dialog.
 5. Use **Back** to move up the catalog, or open **Menu → Edit OPDS login** to change the connection. **Return to local files** closes the overlay and shows KOReader's normal FileManager.
 
-The URL, username, and password are saved locally in `settings/opds_home.lua` as soon as you submit the login, so a failed or interrupted connection does not make you re-enter them. The password is stored in that settings file in the same plain-text form used by KOReader's built-in OPDS catalog settings. Remove the saved connection by editing/deleting that file or clearing the plugin's settings through Plugin management.
+The URL, username, and password are saved locally in `settings/opds_home.lua` as soon as you submit the login, so a failed or interrupted connection does not make you re-enter them. This legacy filename is retained across the plugin rename. The password is stored in that settings file in the same plain-text form used by KOReader's built-in OPDS catalog settings. Remove the saved connection by editing/deleting that file or clearing the plugin's settings through Plugin management.
 
 ## Current limits
 
@@ -68,4 +68,4 @@ If MediaCat works in OPDS Plus but not here, the built-in **OPDS** plugin's UI d
 
 ## Development location
 
-In a source checkout, this plugin lives at `plugins/opds_home.koplugin/`. Copy that directory to a device's `koreader/plugins/` folder to try it. The normal built-in plugin path in a local development checkout is discovered automatically.
+In a source checkout, this plugin lives at `plugins/mediacat.koplugin/`. Copy that directory to a device's `koreader/plugins/` folder to try it. The normal built-in plugin path in a local development checkout is discovered automatically.

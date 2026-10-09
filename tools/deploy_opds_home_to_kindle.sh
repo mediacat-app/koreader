@@ -23,7 +23,8 @@ case "$koreader_dir" in
 esac
 
 remote_plugins="$koreader_dir/plugins"
-remote_home="$remote_plugins/opds_home.koplugin"
+remote_mediacat="$remote_plugins/mediacat.koplugin"
+remote_legacy="$remote_plugins/opds_home.koplugin"
 
 # Quote paths for the SFTP batch command language.
 sftp_quote() {
@@ -36,18 +37,23 @@ sftp_quote() {
 batch_file="$(mktemp)"
 trap 'rm -f "$batch_file"' EXIT
 {
+    # Remove the previous plugin directory name to avoid loading both copies.
+    for file in _meta.lua main.lua README.md; do
+        printf '%s\n' "-rm $(sftp_quote "$remote_legacy/$file")"
+    done
+    printf '%s\n' "-rmdir $(sftp_quote "$remote_legacy")"
     # The plugins directory should exist in a KOReader install. Ignore the
-    # expected "already exists" result for the OPDS Home directory.
-    printf '%s\n' "-mkdir $remote_home"
+    # expected "already exists" result for the MediaCat directory.
+    printf '%s\n' "-mkdir $(sftp_quote "$remote_mediacat")"
     printf 'put %s %s\n' \
-        "$(sftp_quote "$repo_root/plugins/opds_home.koplugin/_meta.lua")" \
-        "$(sftp_quote "$remote_home/_meta.lua")"
+        "$(sftp_quote "$repo_root/plugins/mediacat.koplugin/_meta.lua")" \
+        "$(sftp_quote "$remote_mediacat/_meta.lua")"
     printf 'put %s %s\n' \
-        "$(sftp_quote "$repo_root/plugins/opds_home.koplugin/main.lua")" \
-        "$(sftp_quote "$remote_home/main.lua")"
+        "$(sftp_quote "$repo_root/plugins/mediacat.koplugin/main.lua")" \
+        "$(sftp_quote "$remote_mediacat/main.lua")"
     printf 'put %s %s\n' \
-        "$(sftp_quote "$repo_root/plugins/opds_home.koplugin/README.md")" \
-        "$(sftp_quote "$remote_home/README.md")"
+        "$(sftp_quote "$repo_root/plugins/mediacat.koplugin/README.md")" \
+        "$(sftp_quote "$remote_mediacat/README.md")"
 } > "$batch_file"
 
 printf 'Syncing MediaCat to %s@%s:%s over SFTP port %s\n' \
