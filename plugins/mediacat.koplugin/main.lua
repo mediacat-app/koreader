@@ -316,7 +316,7 @@ end
 local OPDSHome = WidgetContainer:extend{
     name = "mediacat",
     is_doc_only = false,
-    settings_file = DataStorage:getSettingsDir() .. "/opds_home.lua",
+    settings_file = DataStorage:getSettingsDir() .. "/mediacat.lua",
 }
 
 function OPDSHome:init()

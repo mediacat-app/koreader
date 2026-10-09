@@ -46,7 +46,7 @@ From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It sy
 4. A feed with books and no child catalogs opens in a cover grid. Use the bottom **More** control for another feed page. Tap a book, then choose a supported format in KOReader's standard download dialog.
 5. Use **Back** to move up the catalog, or open **Menu → Edit OPDS login** to change the connection. **Return to local files** closes the overlay and shows KOReader's normal FileManager.
 
-The URL, username, and password are saved locally in `settings/opds_home.lua` as soon as you submit the login, so a failed or interrupted connection does not make you re-enter them. This legacy filename is retained across the plugin rename. The password is stored in that settings file in the same plain-text form used by KOReader's built-in OPDS catalog settings. Remove the saved connection by editing/deleting that file or clearing the plugin's settings through Plugin management.
+The URL, username, and password are saved locally in `settings/mediacat.lua` as soon as you submit the login, so a failed or interrupted connection does not make you re-enter them. The password is stored in that settings file in the same plain-text form used by KOReader's built-in OPDS catalog settings. Remove the saved connection by editing/deleting that file or clearing the plugin's settings through Plugin management.
 
 ## Current limits
 
