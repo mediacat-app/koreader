@@ -360,13 +360,15 @@ function OPDSHome:getOPDSBrowserClass()
         return self.OPDSBrowserClass
     end
 
-    -- Prefer KOReader's bundled OPDS modules, even if another plugin has already
-    -- put a module with the same name earlier in package.path.
+    -- Prefer KOReader's bundled OPDS modules and load the browser file directly;
+    -- another plugin may have already cached its own `opdsbrowser` module.
     local source_path = debug.getinfo(1, "S").source:match("^@(.+)$")
     local plugins_dir = source_path and source_path:match("^(.*)/[^/]+/[^/]+$")
     local opds_plugin_path
+    local opds_browser_file
     if plugins_dir then
         opds_plugin_path = plugins_dir .. "/opds.koplugin/?.lua"
+        opds_browser_file = plugins_dir .. "/opds.koplugin/opdsbrowser.lua"
         local other_paths = {}
         for path in package.path:gmatch("[^;]+") do
             if path ~= opds_plugin_path then
@@ -374,15 +376,19 @@ function OPDSHome:getOPDSBrowserClass()
             end
         end
         package.path = opds_plugin_path .. ";" .. table.concat(other_paths, ";")
-
-        local cached_class = package.loaded.opdsbrowser
-        if cached_class and type(cached_class.parseFeed) ~= "function" then
-            logger.warn("MediaCat: discarding incompatible cached opdsbrowser module")
-            package.loaded.opdsbrowser = nil
-        end
     end
 
-    local ok, class = pcall(require, "opdsbrowser")
+    local ok, class
+    if opds_browser_file then
+        local loader, load_error = loadfile(opds_browser_file)
+        if loader then
+            ok, class = pcall(loader)
+        else
+            ok, class = false, load_error
+        end
+    else
+        ok, class = pcall(require, "opdsbrowser")
+    end
     if ok and type(class) == "table" and type(class.parseFeed) == "function"
             and type(class.fetchFeed) == "function" then
         logger.info("MediaCat: using KOReader OPDS browser module", opds_plugin_path or "from package.path")
