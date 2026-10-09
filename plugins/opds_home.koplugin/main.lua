@@ -360,24 +360,45 @@ function OPDSHome:getOPDSBrowserClass()
         return self.OPDSBrowserClass
     end
 
-    -- The built-in OPDS plugin adds its directory to package.path only when
-    -- enabled. MediaCat can reuse its browser modules without enabling its UI.
+    -- Prefer KOReader's bundled OPDS modules, even if another plugin has already
+    -- put a module with the same name earlier in package.path.
     local source_path = debug.getinfo(1, "S").source:match("^@(.+)$")
     local plugins_dir = source_path and source_path:match("^(.*)/[^/]+/[^/]+$")
+    local opds_plugin_path
     if plugins_dir then
-        local opds_plugin_path = plugins_dir .. "/opds.koplugin/?.lua"
-        if not package.path:find(opds_plugin_path, 1, true) then
-            package.path = opds_plugin_path .. ";" .. package.path
+        opds_plugin_path = plugins_dir .. "/opds.koplugin/?.lua"
+        local other_paths = {}
+        for path in package.path:gmatch("[^;]+") do
+            if path ~= opds_plugin_path then
+                table.insert(other_paths, path)
+            end
+        end
+        package.path = opds_plugin_path .. ";" .. table.concat(other_paths, ";")
+
+        local cached_class = package.loaded.opdsbrowser
+        if cached_class and type(cached_class.parseFeed) ~= "function" then
+            logger.warn("MediaCat: discarding incompatible cached opdsbrowser module")
+            package.loaded.opdsbrowser = nil
         end
     end
 
     local ok, class = pcall(require, "opdsbrowser")
-    if ok then
+    if ok and type(class) == "table" and type(class.parseFeed) == "function"
+            and type(class.fetchFeed) == "function" then
+        logger.info("MediaCat: using KOReader OPDS browser module", opds_plugin_path or "from package.path")
         self.OPDSBrowserClass = class
         return class
     end
+    if ok then
+        local init_info = type(class) == "table" and type(class.init) == "function"
+            and debug.getinfo(class.init, "S")
+        local source = init_info and init_info.source or "unknown source"
+        logger.err("MediaCat: loaded OPDS browser module has no compatible feed API; source:", source)
+    else
+        logger.err("MediaCat: could not load OPDS browser module:", class)
+    end
     UIManager:show(InfoMessage:new{
-        text = _("MediaCat could not load KOReader's built-in OPDS browser modules."),
+        text = _("MediaCat could not load a compatible KOReader OPDS browser module."),
     })
 end
 
