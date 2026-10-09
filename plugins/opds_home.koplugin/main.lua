@@ -276,9 +276,9 @@ local OPDSHome = WidgetContainer:extend{
 }
 
 function OPDSHome:init()
-    -- The plugin is instantiated in the reader too. Its home-screen behavior is
-    -- deliberately limited to FileManager instances.
-    if not self.ui or not self.ui.registerPostInitCallback then
+    -- KOReader instantiates non-document plugins in the reader as well. MediaCat
+    -- should only take over when the FileManager home browser is opened.
+    if not self.ui or not self.ui.file_chooser or not self.ui.registerPostInitCallback then
         return
     end
 
