@@ -1,6 +1,6 @@
 # MediaCat
 
-MediaCat puts a simple OPDS login and catalog browser over KOReader's FileManager screen. It uses KOReader's built-in OPDS browser modules and download dialog. Catalog feeds with no child catalogs are shown as a cover grid when their OPDS entries include images.
+MediaCat puts a simple OPDS login and catalog browser over KOReader's FileManager screen. It uses KOReader's built-in OPDS browser modules and download workflow. Catalog feeds with no child catalogs are shown as a cover grid when their OPDS entries include images.
 
 This is an early prototype. It covers the FileManager home screen; it does not change KOReader's startup choice when KOReader opens a previously open book directly.
 
@@ -43,7 +43,7 @@ From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It sy
 1. On the FileManager screen, enter the root OPDS feed URL. Add a username and password if your server requires them.
 2. Tap **Login**. MediaCat fetches the feed and displays its libraries or catalog entries.
 3. Tap a library/folder to open it. In list view, tap **Load next catalog page…** to fetch another feed page.
-4. A feed with books and no child catalogs opens in a cover grid. Use the bottom **More** control for another feed page. Tap a book, then choose a supported format in KOReader's standard download dialog.
+4. A feed with books and no child catalogs opens in a cover grid. Use the bottom **More** control for another feed page. Downloaded books show a down-arrow badge and open when tapped. Tapping a book that is not on the device asks whether to download and open it.
 5. Use **Back** to move up the catalog, or open **Menu → Edit OPDS login** to change the connection. **Return to local files** closes the overlay and shows KOReader's normal FileManager.
 
 The URL, username, and password are saved locally in `settings/mediacat.lua` as soon as you submit the login, so a failed or interrupted connection does not make you re-enter them. The password is stored in that settings file in the same plain-text form used by KOReader's built-in OPDS catalog settings. Remove the saved connection by editing/deleting that file or clearing the plugin's settings through Plugin management.
@@ -54,7 +54,7 @@ The URL, username, and password are saved locally in `settings/mediacat.lua` as 
 - Grid covers come from OPDS image or thumbnail links. Entries without a cover show a placeholder.
 - The cover grid follows each OPDS `next` link as you page forward, with no client-side page limit. When a feed omits its total count, the footer reports how many books have been loaded and whether more pages are available.
 - Only HTTP and HTTPS feed URLs are accepted. Authentication uses KOReader's built-in OPDS client behavior, including HTTP Basic authentication and catalog cookies. KOReader's client advertises OPDS 2.0 before Atom/OPDS 1.x; if the OPDS 2.0 response cannot be parsed, MediaCat retries with Atom preferred.
-- Book taps use KOReader's existing OPDS download flow and download directory settings.
+- Book downloads use KOReader's existing OPDS download workflow and download directory settings.
 - MediaCat reuses internal modules from the built-in OPDS plugin, so it must work with the modules bundled in the installed KOReader version. The deployment script updates only MediaCat and preserves those bundled modules. The built-in OPDS plugin's UI does not need to be enabled. OPDS Plus is a separate implementation and does not provide those modules.
 - The first version does not add search, facets, borrowing, or OPDS page streaming to the custom browser. The built-in OPDS browser remains available from the Search menu.
 - **Local files** returns to KOReader's normal FileManager at its current folder. It shows local storage, not a downloaded-books-only list; OPDS downloads go to KOReader's configured download folder.
