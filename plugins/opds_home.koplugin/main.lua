@@ -173,7 +173,7 @@ function CoverGrid:init()
                 local item = self.items[index]
                 table.insert(row_items, CoverTile:new{
                     item = item,
-                    cover = self.load_cover(item, self.tile_width, self.tile_height),
+                    cover = self.load_cover(item),
                     width = self.tile_width,
                     height = self.tile_height,
                     on_select = self.on_select,
@@ -894,7 +894,7 @@ function OPDSHome:showConnectingCovers()
     return message
 end
 
-function OPDSHome:loadCover(item, width, height)
+function OPDSHome:loadCover(item)
     local image_url = item.thumbnail or item.image
     if not image_url or not self.opds_browser then
         return
@@ -930,7 +930,9 @@ function OPDSHome:loadCover(item, width, height)
         end
     end
     if data then
-        local image = RenderImage:renderImageData(data, #data, false, width, height)
+        -- Keep the decoded image at its native dimensions so ImageWidget can
+        -- fit it into the tile without changing the cover's aspect ratio.
+        local image = RenderImage:renderImageData(data, #data, false)
         self.cover_cache[image_url] = image or false
         return image
     end
