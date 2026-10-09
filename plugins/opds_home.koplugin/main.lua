@@ -110,6 +110,7 @@ function CoverTile:onTapSelect()
 end
 
 local CoverGrid = InputContainer:extend{
+    covers_fullscreen = true,
     key_events = {
         Back = { { Device.input.group.Back } },
         PagePrevious = { { Device.input.group.PgBack } },
@@ -883,7 +884,8 @@ function OPDSHome:showGrid(state, page)
     }
     UIManager:close(loading)
     self.current_screen = grid
-    UIManager:show(grid)
+    UIManager:show(grid, "ui")
+    UIManager:forceRePaint()
 end
 
 function OPDSHome:showConnectingCovers()
