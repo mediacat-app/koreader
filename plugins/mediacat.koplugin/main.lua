@@ -3,13 +3,13 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local DataStorage = require("datastorage")
 local Device = require("device")
+local DocumentRegistry = require("document/documentregistry")
 local Blitbuffer = require("ffi/blitbuffer")
 local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
-local IconWidget = require("ui/widget/iconwidget")
 local ImageWidget = require("ui/widget/imagewidget")
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -90,6 +90,33 @@ local function fetchCoverBatch(tasks, on_progress)
     return downloaded
 end
 
+local ConnectingScreen = InputContainer:extend{
+    covers_fullscreen = true,
+}
+
+function ConnectingScreen:init()
+    local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
+    self.dimen = Geom:new{ x = 0, y = 0, w = screen_w, h = screen_h }
+    self[1] = FrameContainer:new{
+        bordersize = 0,
+        padding = 0,
+        width = screen_w,
+        height = screen_h,
+        background = Blitbuffer.COLOR_WHITE,
+        CenterContainer:new{
+            dimen = Geom:new{ w = screen_w, h = screen_h },
+            TextWidget:new{
+                text = _("Connecting to MediaCat…"),
+                face = Font:getFace("infofont", 22),
+            },
+        },
+    }
+end
+
+function ConnectingScreen:onHome()
+    return true
+end
+
 local CoverTile = InputContainer:extend{}
 
 function CoverTile:init()
@@ -123,19 +150,40 @@ function CoverTile:init()
 
     local cover_area = cover_widget
     if self.downloaded_file then
-        local icon_size = Screen:scaleBySize(20)
+        local badge_diameter = Screen:scaleBySize(28)
+        local badge_border = Screen:scaleBySize(1)
         local badge = FrameContainer:new{
             background = Blitbuffer.COLOR_WHITE,
-            bordersize = 0,
-            padding = Screen:scaleBySize(2),
-            IconWidget:new{
-                icon = "move.down",
-                width = icon_size,
-                height = icon_size,
+            bordersize = badge_border,
+            color = Blitbuffer.COLOR_BLACK,
+            radius = math.floor(badge_diameter / 2),
+            padding = 0,
+            width = badge_diameter,
+            height = badge_diameter,
+            CenterContainer:new{
+                dimen = Geom:new{
+                    w = badge_diameter - 2 * badge_border,
+                    h = badge_diameter - 2 * badge_border,
+                },
+                TextWidget:new{
+                    text = "↓",
+                    face = Font:getFace("infofont", 18),
+                },
             },
         }
         local badge_size = badge:getSize()
-        badge.overlap_offset = { inner_width - badge_size.w, cover_height - badge_size.h }
+        local image_width, image_height = inner_width, cover_height
+        if self.cover then
+            cover_widget:getSize()
+            image_width = cover_widget:getCurrentWidth()
+            image_height = cover_widget:getCurrentHeight()
+        end
+        local image_x = math.floor((inner_width - image_width) / 2)
+        local image_y = math.floor((cover_height - image_height) / 2)
+        badge.overlap_offset = {
+            image_x + image_width - badge_size.w - Screen:scaleBySize(2),
+            image_y + image_height - badge_size.h - Screen:scaleBySize(2),
+        }
         cover_area = OverlapGroup:new{
             allow_mirroring = false,
             dimen = Geom:new{ w = inner_width, h = cover_height },
@@ -209,16 +257,11 @@ function CoverGrid:init()
     local header = CenterContainer:new{
         dimen = Geom:new{ w = screen_w, h = header_h },
         HorizontalGroup:new{
-            Button:new{
-                text = _("Back"),
-                width = button_w,
-                show_parent = self,
-                callback = self.on_back,
-            },
+            WidgetContainer:new{ dimen = Geom:new{ w = button_w, h = header_h } },
             CenterContainer:new{
                 dimen = Geom:new{ w = title_w, h = header_h },
                 TextBoxWidget:new{
-                    text = self.title or _("OPDS books"),
+                    text = self.title or _("MediaCat"),
                     face = Font:getFace("infofont", 20),
                     alignment = "center",
                     width = title_w,
@@ -269,7 +312,7 @@ function CoverGrid:init()
     local has_more = self.has_more
     local footer_text
     if #self.items == 0 then
-        footer_text = _("No books in this catalog")
+        footer_text = self.empty_message or _("No books in this catalog")
     else
         if self.total_count then
             footer_text = T(_("%1–%2 of %3 books"), first, last, self.total_count)
@@ -325,7 +368,15 @@ function CoverGrid:init()
 end
 
 function CoverGrid:onBack()
-    self.on_back()
+    if self.can_go_back then
+        self.on_back()
+    end
+    return true
+end
+
+function CoverGrid:onHome()
+    -- Keep the catalog as the forced home view. The FileManager's separate
+    -- top-edge swipe zone still opens the normal KOReader menu.
     return true
 end
 
@@ -372,8 +423,8 @@ function OPDSHome:init()
         UIManager:nextTick(function()
             if self.saved_connection and self.saved_connection.url then
                 NetworkMgr:runWhenConnected(function()
-                    self:connectToCatalog(self.saved_connection.url, _("OPDS catalog"), self.saved_connection,
-                        _("Could not reconnect to the OPDS catalog. Check the URL and login."))
+                    self:connectToCatalog(self.saved_connection.url, _("MediaCat"), self.saved_connection,
+                        _("Could not reconnect to MediaCat. Check the URL and login."))
                 end)
             else
                 self:showLogin()
@@ -383,8 +434,8 @@ function OPDSHome:init()
 end
 
 function OPDSHome:showConnecting()
-    local message = InfoMessage:new{ text = _("Connecting to OPDS catalog…") }
-    UIManager:show(message)
+    local message = ConnectingScreen:new{}
+    UIManager:show(message, "full")
     UIManager:forceRePaint()
     return message
 end
@@ -392,6 +443,10 @@ end
 function OPDSHome:connectToCatalog(feed_url, title, connection, fallback_error)
     self.connection = connection or self.connection
     logger.info("MediaCat: connection attempt started")
+    local previous_block_timeout = socketutil.LARGE_BLOCK_TIMEOUT
+    local previous_total_timeout = socketutil.LARGE_TOTAL_TIMEOUT
+    socketutil.LARGE_BLOCK_TIMEOUT = 5
+    socketutil.LARGE_TOTAL_TIMEOUT = 5
     local connecting
     local ok, connected = xpcall(function()
         connecting = self:showConnecting()
@@ -399,13 +454,9 @@ function OPDSHome:connectToCatalog(feed_url, title, connection, fallback_error)
     end, function(err)
         return logMediaCatError("connection flow", err)
     end)
+    socketutil.LARGE_BLOCK_TIMEOUT = previous_block_timeout
+    socketutil.LARGE_TOTAL_TIMEOUT = previous_total_timeout
 
-    if connecting then
-        local closed, close_error = pcall(UIManager.close, UIManager, connecting)
-        if not closed then
-            logMediaCatError("closing connection message", close_error)
-        end
-    end
     if not ok then
         self.last_catalog_error = connected
         connected = false
@@ -415,19 +466,57 @@ function OPDSHome:connectToCatalog(feed_url, title, connection, fallback_error)
     if not connected then
         logger.warn("MediaCat: connection failed:", self.last_catalog_error or fallback_error or "unknown error")
         local shown, show_error = xpcall(function()
-            self:showLogin()
-            UIManager:show(InfoMessage:new{
-                text = self.last_catalog_error or fallback_error
-                    or _("Could not read an OPDS feed. Check the URL, login, server response, and feed format."),
-            })
+            self:showConnectionFailure()
         end, function(err)
-            return logMediaCatError("showing login error", err)
+            return logMediaCatError("showing connection failure choices", err)
         end)
         if not shown then
             self.last_catalog_error = show_error
         end
     end
+    if connecting then
+        local closed, close_error = pcall(UIManager.close, UIManager, connecting)
+        if not closed then
+            logMediaCatError("closing connection screen", close_error)
+        end
+    end
     return connected
+end
+
+function OPDSHome:showConnectionFailure()
+    self.history = {}
+    self.current_state = {
+        items = {},
+        is_offline = true,
+        empty_message = _("MediaCat is not reachable"),
+    }
+    self:renderState(self.current_state)
+
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("MediaCat is unavailable"),
+        buttons = {
+            {{
+                text = _("Connect to another instance"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    self.login_values = self.connection or self.saved_connection
+                    self:showLogin()
+                end,
+            }},
+            {{
+                text = _("Downloaded Books"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:showDownloadedBooks()
+                end,
+            }},
+        },
+        shrink_unneeded_width = true,
+    }
+    UIManager:show(dialog)
 end
 
 function OPDSHome:closeCurrentScreen()
@@ -501,7 +590,7 @@ function OPDSHome:newOPDSBrowser()
         return
     end
     local helper = class:extend{
-        root_catalog_title = _("OPDS catalog"),
+        root_catalog_title = _("MediaCat"),
         root_catalog_username = self.connection.username,
         root_catalog_password = self.connection.password,
         root_catalog_raw_names = false,
@@ -618,13 +707,13 @@ function OPDSHome:showLogin()
             },
             {
                 {
-                    text = _("Local files"),
-                    id = "close",
+                    text = _("Downloaded Books"),
                     callback = function()
                         UIManager:close(dialog)
                         if self.current_screen == dialog then
                             self.current_screen = nil
                         end
+                        self:showDownloadedBooks()
                     end,
                 },
                 {
@@ -658,7 +747,7 @@ function OPDSHome:showLogin()
                                 self.opds_browser = nil
                                 self.current_state = nil
                                 self.history = {}
-                                self:connectToCatalog(feed_url, _("OPDS catalog"), connection)
+                                self:connectToCatalog(feed_url, _("MediaCat"), connection)
                             end)
                         end, function(callback_error)
                             return logMediaCatError("login callback", callback_error)
@@ -810,7 +899,7 @@ function OPDSHome:openCatalog(feed_url, title, push_history)
 
         self.current_state = {
             url = feed_url,
-            title = feed_title or title or _("OPDS catalog"),
+            title = feed_title or title or _("MediaCat"),
             items = items,
             hrefs = items.hrefs,
             total_count = items.total_count,
@@ -840,8 +929,73 @@ function OPDSHome:isLeaf(state)
     return true
 end
 
+function OPDSHome:getDownloadedBooks()
+    local download_dir
+    if self.opds_browser and self.opds_browser.getCurrentDownloadDir then
+        local ok, path = pcall(self.opds_browser.getCurrentDownloadDir, self.opds_browser)
+        if ok then
+            download_dir = path
+        end
+    end
+    download_dir = download_dir or G_reader_settings:readSetting("download_dir")
+        or G_reader_settings:readSetting("lastdir")
+    if not download_dir or lfs.attributes(download_dir, "mode") ~= "directory" then
+        return {}
+    end
+
+    local ok, iter, directory = pcall(lfs.dir, download_dir)
+    if not ok then
+        logger.warn("MediaCat: could not read downloaded books directory", download_dir, iter)
+        return {}
+    end
+
+    local books = {}
+    local prefix = download_dir:sub(-1) == "/" and "" or "/"
+    for filename in iter, directory do
+        if filename ~= "." and filename ~= ".." and filename:sub(1, 1) ~= "." then
+            local path = download_dir .. prefix .. filename
+            local attributes = lfs.attributes(path)
+            if attributes and attributes.mode == "file" and DocumentRegistry:hasProvider(path) then
+                local props = {}
+                if self.ui.bookinfo then
+                    local got_props, value = pcall(self.ui.bookinfo.getDocProps,
+                        self.ui.bookinfo, path, nil, true)
+                    if got_props and type(value) == "table" then
+                        props = value
+                    end
+                end
+                local title = props.display_title or filename:gsub("%.[^%.]+$", "")
+                local author = props.authors
+                table.insert(books, {
+                    title = title,
+                    author = author,
+                    text = author and (title .. " - " .. author) or title,
+                    local_path = path,
+                })
+            end
+        end
+    end
+    table.sort(books, function(a, b)
+        return a.title:lower() < b.title:lower()
+    end)
+    return books
+end
+
+function OPDSHome:showDownloadedBooks()
+    local books = self:getDownloadedBooks()
+    self:closeCurrentScreen()
+    self.history = {}
+    self.current_state = {
+        items = books,
+        total_count = #books,
+        is_offline = true,
+        empty_message = _("No downloaded books were found"),
+    }
+    self:renderState(self.current_state)
+end
+
 function OPDSHome:renderState(state)
-    if self:isLeaf(state) then
+    if state.is_offline or self:isLeaf(state) then
         self:showGrid(state, 1)
     else
         self:showCatalogMenu(state)
@@ -862,7 +1016,7 @@ function OPDSHome:showCatalogMenu(state)
 
     local menu
     menu = Menu:new{
-        title = state.title,
+        title = _("MediaCat"),
         item_table = items,
         covers_fullscreen = true,
         is_borderless = true,
@@ -934,6 +1088,9 @@ function OPDSHome:getDownloadInfo(item)
 end
 
 function OPDSHome:findDownloadedFile(item)
+    if item.local_path then
+        return item.local_path
+    end
     local path = self:getDownloadInfo(item)
     return path
 end
@@ -1000,14 +1157,11 @@ function OPDSHome:loadMore(state, on_done)
 end
 
 function OPDSHome:goBack()
-    self:closeCurrentScreen()
     local previous = table.remove(self.history)
     if previous then
+        self:closeCurrentScreen()
         self.current_state = previous
         self:renderState(previous)
-    else
-        self.current_state = nil
-        self:showLogin()
     end
 end
 
@@ -1037,10 +1191,12 @@ function OPDSHome:showGrid(state, page)
         end)
     end
     local grid = CoverGrid:new{
-        title = state.title,
+        title = _("MediaCat"),
+        can_go_back = #self.history > 0,
         items = state.items,
         page = page,
         total_count = state.total_count,
+        empty_message = state.empty_message,
         has_more = state.hrefs and state.hrefs.next,
         load_cover = function(item, width, height) return self:loadCover(item, width, height) end,
         find_downloaded_file = function(item) return self:findDownloadedFile(item) end,
@@ -1096,6 +1252,25 @@ function OPDSHome:showConnectingCovers()
 end
 
 function OPDSHome:loadCover(item)
+    if item.local_path then
+        local cache_key = "local:" .. item.local_path
+        local cached_cover = self.cover_cache[cache_key]
+        if cached_cover ~= nil then
+            return cached_cover or nil
+        end
+        local cover
+        if self.ui.bookinfo then
+            local ok, image = pcall(self.ui.bookinfo.getCoverImage,
+                self.ui.bookinfo, nil, item.local_path)
+            if ok then
+                cover = image
+            else
+                logger.warn("MediaCat: could not load downloaded book cover", item.local_path, image)
+            end
+        end
+        self.cover_cache[cache_key] = cover or false
+        return cover
+    end
     local image_url = item.thumbnail or item.image
     if not image_url then
         return
@@ -1233,22 +1408,20 @@ function OPDSHome:showOptions(anchor_menu)
     dialog = ButtonDialog:new{
         buttons = {
             {{
-                text = _("Edit OPDS login"),
+                text = _("Downloaded Books"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:showDownloadedBooks()
+                end,
+            }},
+            {{
+                text = _("Connect to another MediaCat"),
                 align = "left",
                 callback = function()
                     UIManager:close(dialog)
                     self.login_values = self.connection or self.saved_connection
                     self:showLogin()
-                end,
-            }},
-            {{
-                text = _("Return to local files"),
-                align = "left",
-                callback = function()
-                    UIManager:close(dialog)
-                    self:closeCurrentScreen()
-                    self.current_state = nil
-                    self.history = {}
                 end,
             }},
         },
