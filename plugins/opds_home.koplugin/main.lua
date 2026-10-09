@@ -17,7 +17,6 @@ local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
 local RenderImage = require("ui/renderimage")
-local Size = require("ui/size")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
@@ -46,8 +45,8 @@ local CoverTile = InputContainer:extend{}
 function CoverTile:init()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
 
-    local border = Size.border.thin
-    local padding = Screen:scaleBySize(4)
+    local border = 0
+    local padding = Screen:scaleBySize(2)
     local inner_width = self.width - 2 * (border + padding)
     local inner_height = self.height - 2 * (border + padding)
     local title_height = math.min(Screen:scaleBySize(58), math.floor(inner_height / 2))
