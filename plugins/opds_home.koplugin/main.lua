@@ -806,21 +806,33 @@ function OPDSHome:loadCover(item, width, height)
         return self.cover_cache[image_url] or nil
     end
 
-    local chunks = {}
-    socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-    local ok, code = pcall(function()
-        return self.opds_browser:getHttpClient():request{
-            url = image_url,
-            method = "GET",
-            headers = { ["Accept-Encoding"] = "identity" },
-            sink = ltn12.sink.table(chunks),
-            username = self.connection.username,
-            password = self.connection.password,
-        }
-    end)
-    socketutil:reset_timeout()
-    if ok and code == 200 then
-        local data = table.concat(chunks)
+    local data
+    if self.opds_browser.getHttpClient then
+        local chunks = {}
+        socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
+        local ok, code = pcall(function()
+            return self.opds_browser:getHttpClient():request{
+                url = image_url,
+                method = "GET",
+                headers = { ["Accept-Encoding"] = "identity" },
+                sink = ltn12.sink.table(chunks),
+                username = self.connection.username,
+                password = self.connection.password,
+            }
+        end)
+        socketutil:reset_timeout()
+        if ok and code == 200 then
+            data = table.concat(chunks)
+        end
+    elseif self.opds_browser.fetchFeed then
+        -- KOReader 2026.07.1's built-in OPDS browser exposes fetchFeed but
+        -- predates getHttpClient. Keep cover loading compatible with both APIs.
+        local ok, body = pcall(self.opds_browser.fetchFeed, self.opds_browser, image_url)
+        if ok then
+            data = body
+        end
+    end
+    if data then
         local image = RenderImage:renderImageData(data, #data, false, width, height)
         self.cover_cache[image_url] = image or false
         return image
