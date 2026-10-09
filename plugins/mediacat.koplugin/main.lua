@@ -32,6 +32,8 @@ local logger = require("logger")
 local mime = require("mime")
 local socketutil = require("socketutil")
 local socket_url = require("socket.url")
+local time = require("ui/time")
+local Trapper = require("ui/trapper")
 local _ = require("gettext")
 
 local Screen = Device.screen
@@ -55,6 +57,37 @@ local function getCoverGridLayout()
     local tile_height = math.floor(body_h / rows)
     return screen_w, screen_h, header_h, footer_h, body_h, columns, rows,
         tile_width, tile_height, columns * rows
+end
+
+local function fetchCoverBatch(tasks, on_progress)
+    local ok, async = pcall(require, "httpasync")
+    if not ok then
+        return nil, async
+    end
+    local headers_by_url = {}
+    for _, task in ipairs(tasks) do
+        headers_by_url[task.url] = task.headers
+    end
+    local downloaded = {}
+    local fetched, fetch_error = pcall(async.fetch_many, tasks, {
+        concurrency = 8,
+        get_url = function(task) return task.url end,
+        fetch = function(image_url)
+            return async.fetch_url(image_url, 0, headers_by_url[image_url])
+        end,
+        on_success = function(task, data)
+            downloaded[task.url] = data
+        end,
+        on_failure = function(task, err)
+            logger.dbg("MediaCat: cover fetch failed", task.url, err)
+            downloaded[task.url] = false
+        end,
+        on_progress = on_progress,
+    })
+    if not fetched then
+        return nil, fetch_error
+    end
+    return downloaded
 end
 
 local CoverTile = InputContainer:extend{}
@@ -987,9 +1020,13 @@ function OPDSHome:showGrid(state, page)
             has_uncached_cover = true
         end
     end
-    local loading = has_uncached_cover and self:showConnectingCovers()
+    local loading
     if has_uncached_cover then
-        self:fetchCovers(page_items)
+        self:fetchCovers(page_items, function()
+            if not loading then
+                loading = self:showConnectingCovers()
+            end
+        end)
     end
     local grid = CoverGrid:new{
         title = state.title,
@@ -1025,6 +1062,22 @@ function OPDSHome:showGrid(state, page)
     self.current_screen = grid
     UIManager:show(grid, "ui")
     UIManager:forceRePaint()
+
+    local next_first = last + 1
+    if next_first <= #state.items then
+        local next_items = {}
+        local next_last = math.min(#state.items, next_first + per_page - 1)
+        for index = next_first, next_last do
+            table.insert(next_items, state.items[index])
+        end
+        UIManager:nextTick(function()
+            if self.current_state == state and self.current_screen == grid then
+                Trapper:wrap(function()
+                    self:prefetchCovers(next_items)
+                end)
+            end
+        end)
+    end
 end
 
 function OPDSHome:showConnectingCovers()
@@ -1083,67 +1136,34 @@ local function isSameOrigin(left_url, right_url)
         and left_port == right_port
 end
 
-function OPDSHome:fetchCovers(items)
+function OPDSHome:makeCoverFetchTasks(items)
     local tasks = {}
     local seen = {}
+    local client = self.opds_browser.getHttpClient and self.opds_browser:getHttpClient()
+    local cookie_jar = client and client.cookie_jar
     for _, item in ipairs(items) do
         local image_url = item.thumbnail or item.image
         if image_url and self.cover_cache[image_url] == nil and not seen[image_url] then
             seen[image_url] = true
-            table.insert(tasks, { url = image_url })
-        end
-    end
-    if #tasks == 0 then
-        return
-    end
-
-    local downloaded = {}
-    local async_ok, async = pcall(require, "httpasync")
-    if async_ok then
-        local client = self.opds_browser.getHttpClient and self.opds_browser:getHttpClient()
-        local cookie_jar = client and client.cookie_jar
-        local options = {
-            concurrency = 8,
-            get_url = function(task) return task.url end,
-            fetch = function(image_url)
-                local headers = { ["Accept-Encoding"] = "identity" }
-                if cookie_jar then
-                    local cookie = cookie_jar:headerFor(image_url)
-                    if cookie then headers.Cookie = cookie end
-                end
-                if self.connection.username and self.connection.password
-                        and isSameOrigin(self.connection.url, image_url) then
-                    headers.Authorization = "Basic " .. mime.b64(
-                        self.connection.username .. ":" .. self.connection.password)
-                end
-                return async.fetch_url(image_url, 0, headers)
-            end,
-            on_success = function(task, data)
-                downloaded[task.url] = data
-            end,
-            on_failure = function(task, err)
-                logger.dbg("MediaCat: cover fetch failed", task.url, err)
-                downloaded[task.url] = false
-            end,
-        }
-        local ok, err = pcall(async.fetch_many, tasks, options)
-        if not ok then
-            logger.warn("MediaCat: parallel cover fetching failed; retrying sequentially:", err)
-            for _, task in ipairs(tasks) do
-                if downloaded[task.url] == nil then
-                    downloaded[task.url] = self:fetchCoverData(task.url) or false
-                end
+            local headers = { ["Accept-Encoding"] = "identity" }
+            if cookie_jar then
+                local cookie = cookie_jar:headerFor(image_url)
+                if cookie then headers.Cookie = cookie end
             end
-        end
-    else
-        -- Older installations without httpasync retain the built-in sync path.
-        for _, task in ipairs(tasks) do
-            downloaded[task.url] = self:fetchCoverData(task.url) or false
+            if self.connection.username and self.connection.password
+                    and isSameOrigin(self.connection.url, image_url) then
+                headers.Authorization = "Basic " .. mime.b64(
+                    self.connection.username .. ":" .. self.connection.password)
+            end
+            table.insert(tasks, { url = image_url, headers = headers })
         end
     end
+    return tasks
+end
 
+function OPDSHome:cacheCoverDownloads(tasks, downloaded)
     for _, task in ipairs(tasks) do
-        local data = downloaded[task.url]
+        local data = downloaded and downloaded[task.url]
         if data then
             -- Keep the decoded image at its native dimensions so ImageWidget can
             -- fit it into the tile without changing the cover's aspect ratio.
@@ -1152,6 +1172,51 @@ function OPDSHome:fetchCovers(items)
         else
             self.cover_cache[task.url] = false
         end
+    end
+end
+
+function OPDSHome:fetchCovers(items, on_slow)
+    local tasks = self:makeCoverFetchTasks(items)
+    if #tasks == 0 then
+        return
+    end
+
+    local start_time = time.now()
+    local loading_shown = false
+    local function on_progress(completed, total)
+        if on_slow and not loading_shown and completed < total
+                and time.now() - start_time >= time.s(0.5) then
+            loading_shown = true
+            on_slow()
+        end
+        return true
+    end
+    local downloaded, err = fetchCoverBatch(tasks, on_progress)
+    if not downloaded then
+        logger.warn("MediaCat: parallel cover fetching failed; retrying sequentially:", err)
+        downloaded = {}
+        for _, task in ipairs(tasks) do
+            downloaded[task.url] = self:fetchCoverData(task.url) or false
+        end
+    end
+    self:cacheCoverDownloads(tasks, downloaded)
+end
+
+function OPDSHome:prefetchCovers(items)
+    local tasks = self:makeCoverFetchTasks(items)
+    if #tasks == 0 then
+        return
+    end
+    local has_async = pcall(require, "httpasync")
+    if not has_async then
+        return
+    end
+    local completed, downloaded = Trapper:dismissableRunInSubprocess(function()
+        local results = fetchCoverBatch(tasks)
+        return results or {}
+    end)
+    if completed and type(downloaded) == "table" then
+        self:cacheCoverDownloads(tasks, downloaded)
     end
 end
 

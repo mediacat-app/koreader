@@ -52,6 +52,7 @@ The URL, username, and password are saved locally in `settings/mediacat.lua` as 
 
 - The browser displays catalog links in a list and only switches to the cover grid at a leaf feed.
 - Grid covers come from OPDS image or thumbnail links. Entries without a cover show a placeholder.
+- Visible-page covers download concurrently, and MediaCat prefetches the next grid page. The cover loading message appears only if the visible page still has missing covers after 500 ms.
 - The cover grid follows each OPDS `next` link as you page forward, with no client-side page limit. When a feed omits its total count, the footer reports how many books have been loaded and whether more pages are available.
 - Only HTTP and HTTPS feed URLs are accepted. Authentication uses KOReader's built-in OPDS client behavior, including HTTP Basic authentication and catalog cookies. KOReader's client advertises OPDS 2.0 before Atom/OPDS 1.x; if the OPDS 2.0 response cannot be parsed, MediaCat retries with Atom preferred.
 - Book downloads use KOReader's existing OPDS download workflow and download directory settings.
