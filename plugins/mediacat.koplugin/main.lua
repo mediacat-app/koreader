@@ -353,9 +353,10 @@ local OPDSHome = WidgetContainer:extend{
 }
 
 function OPDSHome:init()
-    -- KOReader instantiates non-document plugins in the reader as well. MediaCat
-    -- should only take over when the FileManager home browser is opened.
-    if not self.ui or not self.ui.file_chooser or not self.ui.registerPostInitCallback then
+    -- FileManager creates plugin instances before setupLayout() creates its
+    -- file chooser, so check for it from the post-init callback instead. KOReader
+    -- also instantiates non-document plugins in ReaderUI, where it will be absent.
+    if not self.ui or not self.ui.registerPostInitCallback then
         return
     end
 
@@ -365,6 +366,9 @@ function OPDSHome:init()
     self.history = {}
     self.cover_cache = {}
     self.ui:registerPostInitCallback(function()
+        if not self.ui.file_chooser then
+            return
+        end
         UIManager:nextTick(function()
             if self.saved_connection and self.saved_connection.url then
                 NetworkMgr:runWhenConnected(function()
