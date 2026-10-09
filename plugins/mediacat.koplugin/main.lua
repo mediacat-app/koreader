@@ -1167,7 +1167,8 @@ end
 
 function OPDSHome:showGrid(state, page)
     self:closeCurrentScreen()
-    local _, _, _, _, _, _, _, _, _, per_page = getCoverGridLayout()
+    local layout = { getCoverGridLayout() }
+    local per_page = layout[10]
     local total_pages = math.max(1, math.ceil(#state.items / per_page))
     page = math.max(1, math.min(page or 1, total_pages))
     local first = (page - 1) * per_page + 1
