@@ -418,7 +418,7 @@ function OPDSHome:newOPDSBrowser()
     if not class then
         return
     end
-    local helper = setmetatable({
+    local helper = class:extend{
         root_catalog_title = _("OPDS catalog"),
         root_catalog_username = self.connection.username,
         root_catalog_password = self.connection.password,
@@ -428,7 +428,7 @@ function OPDSHome:newOPDSBrowser()
         _manager = { ui = self.ui, updated = false },
         file_downloaded_callback = function(file) self:offerToOpen(file) end,
         file_read_now_callback = function(file) self:openDownloadedFile(file) end,
-    }, class)
+    }
     self.opds_browser = helper
     return helper
 end
