@@ -397,6 +397,25 @@ function CoverGrid:onPageNext()
     return true
 end
 
+local MediaCatMenu = Menu:extend{}
+
+function MediaCatMenu:onHome()
+    return true
+end
+
+function MediaCatMenu:onSwipe(arg, ges_ev)
+    if ges_ev.direction == "south" then
+        -- The full-screen Menu would normally close on a south swipe. Route
+        -- the gesture to FileManager's configured menu zones instead, so a
+        -- top-edge swipe opens KOReader's normal menu without leaving MediaCat.
+        if self.ui and self.ui.menu then
+            self.ui.menu:onGesture(ges_ev)
+        end
+        return true
+    end
+    return Menu.onSwipe(self, arg, ges_ev)
+end
+
 local OPDSHome = WidgetContainer:extend{
     name = "mediacat",
     is_doc_only = false,
@@ -652,7 +671,8 @@ function OPDSHome:showSavedCatalogs()
         table.insert(items, { text = catalog.title, connection = catalog })
     end
     local menu
-    menu = Menu:new{
+    menu = MediaCatMenu:new{
+        ui = self.ui,
         title = _("Saved OPDS catalogs"),
         item_table = items,
         covers_fullscreen = true,
@@ -1015,7 +1035,8 @@ function OPDSHome:showCatalogMenu(state)
     end
 
     local menu
-    menu = Menu:new{
+    menu = MediaCatMenu:new{
+        ui = self.ui,
         title = _("MediaCat"),
         item_table = items,
         covers_fullscreen = true,
