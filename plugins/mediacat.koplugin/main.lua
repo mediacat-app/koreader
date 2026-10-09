@@ -981,7 +981,11 @@ function OPDSHome:showGrid(state, page)
         on_page = function(next_page) self:showGrid(state, next_page) end,
         on_load_more = function(current_page)
             self:loadMore(state, function()
-                self:showGrid(state, current_page + 1)
+                -- Keep the current grid page. A server page can end partway
+                -- through a grid page (for example 50 entries on a 9-book
+                -- screen); the newly loaded entries should fill its remaining
+                -- slots before the user advances to the following grid page.
+                self:showGrid(state, current_page)
             end)
         end,
     }
