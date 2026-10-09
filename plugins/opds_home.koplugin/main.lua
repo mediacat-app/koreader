@@ -9,6 +9,7 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
+local IconWidget = require("ui/widget/iconwidget")
 local ImageWidget = require("ui/widget/imagewidget")
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -16,6 +17,7 @@ local LuaSettings = require("luasettings")
 local Menu = require("ui/widget/menu")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
+local OverlapGroup = require("ui/widget/overlapgroup")
 local RenderImage = require("ui/renderimage")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
@@ -24,6 +26,7 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
+local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
 local logger = require("logger")
 local socketutil = require("socketutil")
@@ -71,6 +74,29 @@ function CoverTile:init()
         }
     end
 
+    local cover_area = cover_widget
+    if self.downloaded_file then
+        local icon_size = Screen:scaleBySize(20)
+        local badge = FrameContainer:new{
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = 0,
+            padding = Screen:scaleBySize(2),
+            IconWidget:new{
+                icon = "move.down",
+                width = icon_size,
+                height = icon_size,
+            },
+        }
+        local badge_size = badge:getSize()
+        badge.overlap_offset = { inner_width - badge_size.w, cover_height - badge_size.h }
+        cover_area = OverlapGroup:new{
+            allow_mirroring = false,
+            dimen = Geom:new{ w = inner_width, h = cover_height },
+            cover_widget,
+            badge,
+        }
+    end
+
     local title = self.item.title or self.item.text or _("Untitled")
     if self.item.author and self.item.author ~= "" then
         title = title .. "\n" .. self.item.author
@@ -84,7 +110,7 @@ function CoverTile:init()
         VerticalGroup:new{
             CenterContainer:new{
                 dimen = Geom:new{ w = inner_width, h = cover_height },
-                cover_widget,
+                cover_area,
             },
             TextBoxWidget:new{
                 text = title,
@@ -104,7 +130,7 @@ function CoverTile:init()
 end
 
 function CoverTile:onTapSelect()
-    self.on_select(self.item)
+    self.on_select(self.item, self.downloaded_file)
     return true
 end
 
@@ -174,6 +200,7 @@ function CoverGrid:init()
                 table.insert(row_items, CoverTile:new{
                     item = item,
                     cover = self.load_cover(item),
+                    downloaded_file = self.find_downloaded_file(item),
                     width = self.tile_width,
                     height = self.tile_height,
                     on_select = self.on_select,
@@ -821,6 +848,63 @@ function OPDSHome:showDownloads(item)
     self.opds_browser:showDownloads(item)
 end
 
+function OPDSHome:getDownloadInfo(item)
+    local browser = self.opds_browser
+    if not browser then
+        return
+    end
+    local filename = browser:getFileName(item)
+    local first_download
+    for _, acquisition in ipairs(item.acquisitions or {}) do
+        local filetype
+        if not acquisition.count and acquisition.type ~= "borrow" then
+            filetype = browser.getFiletype(acquisition)
+        end
+        if filetype then
+            local path = browser:getLocalDownloadPath(filename, filetype, acquisition.href)
+            if lfs.attributes(path) then
+                return path, acquisition
+            end
+            first_download = first_download or { path = path, acquisition = acquisition }
+        end
+    end
+    if first_download then
+        return nil, first_download.acquisition, first_download.path
+    end
+end
+
+function OPDSHome:findDownloadedFile(item)
+    local path = self:getDownloadInfo(item)
+    return path
+end
+
+function OPDSHome:confirmDownloadAndOpen(item)
+    local ConfirmBox = require("ui/widget/confirmbox")
+    local _, acquisition, path = self:getDownloadInfo(item)
+    if not acquisition then
+        UIManager:show(InfoMessage:new{
+            text = T(_("No downloadable book format was found for %1."), item.title or item.text or ""),
+        })
+        return
+    end
+
+    local title = item.title or item.text or _("Untitled")
+    local author = item.author or _("Unknown Author")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("%1 by %2 is not currently on your device. Download and open now?"), title, author),
+        ok_text = _("Yes"),
+        cancel_text = _("No"),
+        ok_callback = function()
+            NetworkMgr:runWhenConnected(function()
+                self.opds_browser:checkDownloadFile(path, acquisition.href,
+                    self.connection.username, self.connection.password,
+                    function(file) self:openDownloadedFile(file) end,
+                    function(file) self:openDownloadedFile(file) end)
+            end)
+        end,
+    })
+end
+
 function OPDSHome:loadMore(state, on_done)
     local next_url = state.hrefs and state.hrefs.next
     if not next_url then
@@ -871,7 +955,14 @@ function OPDSHome:showGrid(state, page)
         page = page,
         has_more = state.hrefs and state.hrefs.next,
         load_cover = function(item, width, height) return self:loadCover(item, width, height) end,
-        on_select = function(item) self:showDownloads(item) end,
+        find_downloaded_file = function(item) return self:findDownloadedFile(item) end,
+        on_select = function(item, file)
+            if file then
+                self:openDownloadedFile(file)
+            else
+                self:confirmDownloadAndOpen(item)
+            end
+        end,
         on_back = function() self:goBack() end,
         on_menu = function() self:showOptions(grid) end,
         on_page = function(next_page) self:showGrid(state, next_page) end,
