@@ -26,12 +26,20 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local ffiUtil = require("ffi/util")
 local ltn12 = require("ltn12")
+local logger = require("logger")
 local socketutil = require("socketutil")
 local socket_url = require("socket.url")
 local _ = require("gettext")
 
 local Screen = Device.screen
 local T = ffiUtil.template
+
+local function logMediaCatError(context, err)
+    local message = tostring(err)
+    local trace = debug and debug.traceback and debug.traceback(message, 2) or message
+    logger.err("MediaCat " .. context .. " failed:\n" .. trace)
+    return message
+end
 
 local CoverTile = InputContainer:extend{}
 
@@ -282,16 +290,8 @@ function OPDSHome:init()
         UIManager:nextTick(function()
             if self.saved_connection and self.saved_connection.url then
                 NetworkMgr:runWhenConnected(function()
-                    self.connection = self.saved_connection
-                    local connecting = self:showConnecting()
-                    local connected = self:openCatalog(self.connection.url, _("OPDS catalog"), false)
-                    UIManager:close(connecting)
-                    if not connected then
-                        self:showLogin()
-                        UIManager:show(InfoMessage:new{
-                            text = self.last_catalog_error or _("Could not reconnect to the OPDS catalog. Check the URL and login."),
-                        })
-                    end
+                    self:connectToCatalog(self.saved_connection.url, _("OPDS catalog"), self.saved_connection,
+                        _("Could not reconnect to the OPDS catalog. Check the URL and login."))
                 end)
             else
                 self:showLogin()
@@ -305,6 +305,47 @@ function OPDSHome:showConnecting()
     UIManager:show(message)
     UIManager:forceRePaint()
     return message
+end
+
+function OPDSHome:connectToCatalog(feed_url, title, connection, fallback_error)
+    self.connection = connection or self.connection
+    logger.info("MediaCat: connection attempt started")
+    local connecting
+    local ok, connected = xpcall(function()
+        connecting = self:showConnecting()
+        return self:openCatalog(feed_url, title, false)
+    end, function(err)
+        return logMediaCatError("connection flow", err)
+    end)
+
+    if connecting then
+        local closed, close_error = pcall(UIManager.close, UIManager, connecting)
+        if not closed then
+            logMediaCatError("closing connection message", close_error)
+        end
+    end
+    if not ok then
+        self.last_catalog_error = connected
+        connected = false
+    end
+    logger.info("MediaCat: connection attempt finished (connected=" .. tostring(connected) .. ")")
+
+    if not connected then
+        logger.warn("MediaCat: connection failed:", self.last_catalog_error or fallback_error or "unknown error")
+        local shown, show_error = xpcall(function()
+            self:showLogin()
+            UIManager:show(InfoMessage:new{
+                text = self.last_catalog_error or fallback_error
+                    or _("Could not read an OPDS feed. Check the URL, login, server response, and feed format."),
+            })
+        end, function(err)
+            return logMediaCatError("showing login error", err)
+        end)
+        if not shown then
+            self.last_catalog_error = show_error
+        end
+    end
+    return connected
 end
 
 function OPDSHome:closeCurrentScreen()
@@ -481,42 +522,44 @@ function OPDSHome:showLogin()
                     text = _("Login"),
                     is_enter_default = true,
                     callback = function()
-                        local fields = dialog:getFields()
-                        local feed_url, err = self:normalizeURL(fields[1])
-                        if not feed_url then
-                            UIManager:show(InfoMessage:new{ text = err })
-                            return
-                        end
-                        local connection = {
-                            url = feed_url,
-                            username = fields[2] ~= "" and fields[2] or nil,
-                            password = fields[3] ~= "" and fields[3] or nil,
-                        }
-                        self.login_values = connection
-                        -- Retain the entered login across restarts, including
-                        -- when the server is temporarily unreachable.
-                        self.settings:saveSetting("connection", connection)
-                        self.settings:flush()
-                        self.saved_connection = connection
-                        UIManager:close(dialog)
-                        if self.current_screen == dialog then
-                            self.current_screen = nil
-                        end
-                        NetworkMgr:runWhenConnected(function()
-                            self.connection = connection
-                            self.opds_browser = nil
-                            self.current_state = nil
-                            self.history = {}
-                            local connecting = self:showConnecting()
-                            local connected = self:openCatalog(feed_url, _("OPDS catalog"), false)
-                            UIManager:close(connecting)
-                            if not connected then
-                                self:showLogin()
-                                UIManager:show(InfoMessage:new{
-                                    text = self.last_catalog_error or _("Could not read an OPDS feed. Check the URL, login, server response, and feed format."),
-                                })
+                        local ok, err = xpcall(function()
+                            logger.info("MediaCat: login submitted")
+                            local fields = dialog:getFields()
+                            local feed_url, validation_error = self:normalizeURL(fields[1])
+                            if not feed_url then
+                                UIManager:show(InfoMessage:new{ text = validation_error })
+                                return
                             end
+                            local connection = {
+                                url = feed_url,
+                                username = fields[2] ~= "" and fields[2] or nil,
+                                password = fields[3] ~= "" and fields[3] or nil,
+                            }
+                            self.login_values = connection
+                            -- Retain the entered login across restarts, including
+                            -- when the server is temporarily unreachable.
+                            self.settings:saveSetting("connection", connection)
+                            self.settings:flush()
+                            self.saved_connection = connection
+                            UIManager:close(dialog)
+                            if self.current_screen == dialog then
+                                self.current_screen = nil
+                            end
+                            NetworkMgr:runWhenConnected(function()
+                                self.opds_browser = nil
+                                self.current_state = nil
+                                self.history = {}
+                                self:connectToCatalog(feed_url, _("OPDS catalog"), connection)
+                            end)
+                        end, function(callback_error)
+                            return logMediaCatError("login callback", callback_error)
                         end)
+                        if not ok then
+                            self.last_catalog_error = err
+                            UIManager:show(InfoMessage:new{
+                                text = T(_("MediaCat login failed: %1"), err),
+                            })
+                        end
                     end,
                 },
             },
@@ -545,7 +588,11 @@ end
 function OPDSHome:parseAtomFallback(helper, feed_url)
     local original_accept = helper.opds20_feed
     helper.opds20_feed = "application/atom+xml;profile=opds-catalog, application/atom+xml, */*;q=0.1"
-    local ok, feed = pcall(helper.fetchFeed, helper, feed_url)
+    local ok, feed = xpcall(function()
+        return helper:fetchFeed(feed_url)
+    end, function(err)
+        return logMediaCatError("Atom fallback fetch", err)
+    end)
     helper.opds20_feed = original_accept
     if not ok or not feed then
         return nil
@@ -569,16 +616,23 @@ function OPDSHome:readFeed(feed_url, fallback_title)
         return nil
     end
     helper.catalog_title = fallback_title
-    local ok, catalog = pcall(helper.parseFeed, helper, feed_url)
+    logger.info("MediaCat: fetching catalog feed")
+    local ok, catalog = xpcall(function()
+        return helper:parseFeed(feed_url)
+    end, function(err)
+        return logMediaCatError("feed fetch and parse", err)
+    end)
     local function makeItems(parsed_catalog)
         if not parsed_catalog then
             return nil
         end
-        local ok_items, items = pcall(function()
+        local ok_items, items = xpcall(function()
             if parsed_catalog.is_opds2 then
                 return helper:genItemTableFromCatalog2(parsed_catalog, feed_url)
             end
             return helper:genItemTableFromCatalog(parsed_catalog, feed_url)
+        end, function(err)
+            return logMediaCatError("feed normalization", err)
         end)
         if ok_items then
             return items
@@ -592,6 +646,7 @@ function OPDSHome:readFeed(feed_url, fallback_title)
         items, item_error = makeItems(catalog)
     end
     if items then
+        logger.info("MediaCat: catalog parsed (items=" .. tostring(#items) .. ")")
         return items, helper.catalog_title or fallback_title
     end
 
@@ -600,7 +655,11 @@ function OPDSHome:readFeed(feed_url, fallback_title)
     -- after a successful HTTP response; don't mask network/authentication errors.
     if not helper.last_fetch_error and (not ok or not catalog
             or (type(catalog) == "table" and catalog.is_opds2)) then
-        local fallback_ok, fallback_catalog = pcall(self.parseAtomFallback, self, helper, feed_url)
+        local fallback_ok, fallback_catalog = xpcall(function()
+            return self:parseAtomFallback(helper, feed_url)
+        end, function(err)
+            return logMediaCatError("Atom fallback", err)
+        end)
         if fallback_ok and fallback_catalog then
             helper.catalog_title = fallback_catalog.metadata and fallback_catalog.metadata.title or fallback_title
             local fallback_items, fallback_error = makeItems(fallback_catalog)
@@ -619,30 +678,40 @@ function OPDSHome:readFeed(feed_url, fallback_title)
 end
 
 function OPDSHome:openCatalog(feed_url, title, push_history)
-    local parent = self.current_state
-    if push_history and parent then
-        table.insert(self.history, parent)
-    end
-    self:closeCurrentScreen()
-    local items, feed_title = self:readFeed(feed_url, title)
-    if not items then
+    local ok, result = xpcall(function()
+        local parent = self.current_state
         if push_history and parent then
-            table.remove(self.history)
-            self.current_state = parent
-            self:renderState(parent)
-            UIManager:show(InfoMessage:new{ text = _("Could not open that catalog.") })
+            table.insert(self.history, parent)
         end
+        self:closeCurrentScreen()
+        local items, feed_title = self:readFeed(feed_url, title)
+        if not items then
+            if push_history and parent then
+                table.remove(self.history)
+                self.current_state = parent
+                self:renderState(parent)
+                UIManager:show(InfoMessage:new{ text = _("Could not open that catalog.") })
+            end
+            return false
+        end
+
+        self.current_state = {
+            url = feed_url,
+            title = feed_title or title or _("OPDS catalog"),
+            items = items,
+            hrefs = items.hrefs,
+        }
+        logger.info("MediaCat: rendering catalog screen")
+        self:renderState(self.current_state)
+        return true
+    end, function(err)
+        return logMediaCatError("opening or rendering catalog", err)
+    end)
+    if not ok then
+        self.last_catalog_error = result
         return false
     end
-
-    self.current_state = {
-        url = feed_url,
-        title = feed_title or title or _("OPDS catalog"),
-        items = items,
-        hrefs = items.hrefs,
-    }
-    self:renderState(self.current_state)
-    return true
+    return result
 end
 
 function OPDSHome:isLeaf(state)
