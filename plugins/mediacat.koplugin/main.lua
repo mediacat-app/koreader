@@ -29,6 +29,7 @@ local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
 local logger = require("logger")
+local mime = require("mime")
 local socketutil = require("socketutil")
 local socket_url = require("socket.url")
 local _ = require("gettext")
@@ -41,6 +42,19 @@ local function logMediaCatError(context, err)
     local trace = debug and debug.traceback and debug.traceback(message, 2) or message
     logger.err("MediaCat " .. context .. " failed:\n" .. trace)
     return message
+end
+
+local function getCoverGridLayout()
+    local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
+    local header_h = Screen:scaleBySize(62)
+    local footer_h = Screen:scaleBySize(58)
+    local body_h = screen_h - header_h - footer_h
+    local columns = math.max(2, math.min(4, math.floor(screen_w / Screen:scaleBySize(170))))
+    local rows = math.max(1, math.min(4, math.floor(body_h / Screen:scaleBySize(205))))
+    local tile_width = math.floor(screen_w / columns)
+    local tile_height = math.floor(body_h / rows)
+    return screen_w, screen_h, header_h, footer_h, body_h, columns, rows,
+        tile_width, tile_height, columns * rows
 end
 
 local CoverTile = InputContainer:extend{}
@@ -144,15 +158,13 @@ local CoverGrid = InputContainer:extend{
 }
 
 function CoverGrid:init()
-    local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
-    local header_h = Screen:scaleBySize(62)
-    local footer_h = Screen:scaleBySize(58)
-    local body_h = screen_h - header_h - footer_h
-    self.columns = math.max(2, math.min(4, math.floor(screen_w / Screen:scaleBySize(170))))
-    self.rows = math.max(1, math.min(4, math.floor(body_h / Screen:scaleBySize(205))))
-    self.tile_width = math.floor(screen_w / self.columns)
-    self.tile_height = math.floor(body_h / self.rows)
-    self.per_page = self.columns * self.rows
+    local screen_w, screen_h, header_h, footer_h, body_h, columns, rows,
+        tile_width, tile_height, per_page = getCoverGridLayout()
+    self.columns = columns
+    self.rows = rows
+    self.tile_width = tile_width
+    self.tile_height = tile_height
+    self.per_page = per_page
     self.page = math.max(1, math.min(self.page or 1, math.ceil(#self.items / self.per_page)))
     self.dimen = Geom:new{ x = 0, y = 0, w = screen_w, h = screen_h }
 
@@ -960,7 +972,25 @@ end
 
 function OPDSHome:showGrid(state, page)
     self:closeCurrentScreen()
-    local loading = self:showConnectingCovers()
+    local _, _, _, _, _, _, _, _, _, per_page = getCoverGridLayout()
+    local total_pages = math.max(1, math.ceil(#state.items / per_page))
+    page = math.max(1, math.min(page or 1, total_pages))
+    local first = (page - 1) * per_page + 1
+    local last = math.min(#state.items, first + per_page - 1)
+    local page_items = {}
+    local has_uncached_cover = false
+    for index = first, last do
+        local item = state.items[index]
+        table.insert(page_items, item)
+        local image_url = item.thumbnail or item.image
+        if image_url and self.cover_cache[image_url] == nil then
+            has_uncached_cover = true
+        end
+    end
+    local loading = has_uncached_cover and self:showConnectingCovers()
+    if has_uncached_cover then
+        self:fetchCovers(page_items)
+    end
     local grid = CoverGrid:new{
         title = state.title,
         items = state.items,
@@ -989,7 +1019,9 @@ function OPDSHome:showGrid(state, page)
             end)
         end,
     }
-    UIManager:close(loading)
+    if loading then
+        UIManager:close(loading)
+    end
     self.current_screen = grid
     UIManager:show(grid, "ui")
     UIManager:forceRePaint()
@@ -1004,14 +1036,16 @@ end
 
 function OPDSHome:loadCover(item)
     local image_url = item.thumbnail or item.image
-    if not image_url or not self.opds_browser then
+    if not image_url then
         return
     end
-    if self.cover_cache[image_url] ~= nil then
-        return self.cover_cache[image_url] or nil
+    local cached_cover = self.cover_cache[image_url]
+    if cached_cover ~= nil then
+        return cached_cover or nil
     end
+end
 
-    local data
+function OPDSHome:fetchCoverData(image_url)
     if self.opds_browser.getHttpClient then
         local chunks = {}
         socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
@@ -1027,24 +1061,98 @@ function OPDSHome:loadCover(item)
         end)
         socketutil:reset_timeout()
         if ok and code == 200 then
-            data = table.concat(chunks)
+            return table.concat(chunks)
         end
     elseif self.opds_browser.fetchFeed then
-        -- KOReader 2026.07.1's built-in OPDS browser exposes fetchFeed but
-        -- predates getHttpClient. Keep cover loading compatible with both APIs.
         local ok, body = pcall(self.opds_browser.fetchFeed, self.opds_browser, image_url)
         if ok then
-            data = body
+            return body
         end
     end
-    if data then
-        -- Keep the decoded image at its native dimensions so ImageWidget can
-        -- fit it into the tile without changing the cover's aspect ratio.
-        local image = RenderImage:renderImageData(data, #data, false)
-        self.cover_cache[image_url] = image or false
-        return image
+end
+
+local function isSameOrigin(left_url, right_url)
+    local left = socket_url.parse(left_url)
+    local right = socket_url.parse(right_url)
+    if not left or not right or not left.host or not right.host then
+        return false
     end
-    self.cover_cache[image_url] = false
+    local left_port = tonumber(left.port) or (left.scheme == "https" and 443 or 80)
+    local right_port = tonumber(right.port) or (right.scheme == "https" and 443 or 80)
+    return left.scheme == right.scheme and left.host:lower() == right.host:lower()
+        and left_port == right_port
+end
+
+function OPDSHome:fetchCovers(items)
+    local tasks = {}
+    local seen = {}
+    for _, item in ipairs(items) do
+        local image_url = item.thumbnail or item.image
+        if image_url and self.cover_cache[image_url] == nil and not seen[image_url] then
+            seen[image_url] = true
+            table.insert(tasks, { url = image_url })
+        end
+    end
+    if #tasks == 0 then
+        return
+    end
+
+    local downloaded = {}
+    local async_ok, async = pcall(require, "httpasync")
+    if async_ok then
+        local client = self.opds_browser.getHttpClient and self.opds_browser:getHttpClient()
+        local cookie_jar = client and client.cookie_jar
+        local options = {
+            concurrency = 8,
+            get_url = function(task) return task.url end,
+            fetch = function(image_url)
+                local headers = { ["Accept-Encoding"] = "identity" }
+                if cookie_jar then
+                    local cookie = cookie_jar:headerFor(image_url)
+                    if cookie then headers.Cookie = cookie end
+                end
+                if self.connection.username and self.connection.password
+                        and isSameOrigin(self.connection.url, image_url) then
+                    headers.Authorization = "Basic " .. mime.b64(
+                        self.connection.username .. ":" .. self.connection.password)
+                end
+                return async.fetch_url(image_url, 0, headers)
+            end,
+            on_success = function(task, data)
+                downloaded[task.url] = data
+            end,
+            on_failure = function(task, err)
+                logger.dbg("MediaCat: cover fetch failed", task.url, err)
+                downloaded[task.url] = false
+            end,
+        }
+        local ok, err = pcall(async.fetch_many, tasks, options)
+        if not ok then
+            logger.warn("MediaCat: parallel cover fetching failed; retrying sequentially:", err)
+            for _, task in ipairs(tasks) do
+                if downloaded[task.url] == nil then
+                    downloaded[task.url] = self:fetchCoverData(task.url) or false
+                end
+            end
+        end
+    else
+        -- Older installations without httpasync retain the built-in sync path.
+        for _, task in ipairs(tasks) do
+            downloaded[task.url] = self:fetchCoverData(task.url) or false
+        end
+    end
+
+    for _, task in ipairs(tasks) do
+        local data = downloaded[task.url]
+        if data then
+            -- Keep the decoded image at its native dimensions so ImageWidget can
+            -- fit it into the tile without changing the cover's aspect ratio.
+            local image = RenderImage:renderImageData(data, #data, false)
+            self.cover_cache[task.url] = image or false
+        else
+            self.cover_cache[task.url] = false
+        end
+    end
 end
 
 function OPDSHome:showOptions(anchor_menu)

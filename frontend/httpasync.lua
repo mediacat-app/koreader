@@ -23,6 +23,17 @@ local HttpAsync = {}
 local MAX_REDIRECTS = 5
 local DEFAULT_CONCURRENCY = 10
 
+local function has_same_origin(left_url, right_url)
+    local left = socket_url.parse(left_url)
+    local right = socket_url.parse(right_url)
+    if not left or not right or not left.host or not right.host then return false end
+    local left_default = left.scheme == "https" and 443 or 80
+    local right_default = right.scheme == "https" and 443 or 80
+    return left.scheme == right.scheme
+        and left.host:lower() == right.host:lower()
+        and (tonumber(left.port) or left_default) == (tonumber(right.port) or right_default)
+end
+
 -- Yielded by a fetch coroutine to signal completion (followed by item, success, content). Any other first yield value is a socket + "r"/"w" mode.
 local DONE = "DONE"
 
@@ -156,9 +167,13 @@ function HttpAsync.fetch_url(url, redirect_count, headers)
         end
     end
 
+    local host_header = host
+    if parsed.port then
+        host_header = host_header .. ":" .. parsed.port
+    end
     local req_lines = {
         string.format("GET %s HTTP/1.1", path),
-        string.format("Host: %s", host),
+        string.format("Host: %s", host_header),
         string.format("User-Agent: %s", socketutil.USER_AGENT),
     }
     if headers then
@@ -206,6 +221,19 @@ function HttpAsync.fetch_url(url, redirect_count, headers)
         sock:close()
         local location = resp_headers["location"]:gsub("\r$", "")
         local new_url = socket_url.absolute(url, location)
+        if not has_same_origin(url, new_url) and headers then
+            -- Never forward credentials or cookies to another origin on a
+            -- redirect. Public headers can still follow the redirect.
+            local safe_headers = {}
+            for name, value in pairs(headers) do
+                local lower_name = name:lower()
+                if lower_name ~= "authorization" and lower_name ~= "proxy-authorization"
+                        and lower_name ~= "cookie" then
+                    safe_headers[name] = value
+                end
+            end
+            headers = safe_headers
+        end
         return HttpAsync.fetch_url(new_url, redirect_count + 1, headers)
     end
 
