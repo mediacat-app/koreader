@@ -13,7 +13,7 @@ This is an early prototype. It covers the FileManager home screen; it does not c
    - PocketBook: `/applications/koreader/plugins/`
 2. Eject the device and restart KOReader.
 3. Open **Tools → More tools → Plugin management**, enable **MediaCat**, and restart when prompted.
-4. The built-in **OPDS** plugin does not need to be enabled. MediaCat loads its browser, parser, authentication client, and download workflow directly. Existing saved catalogs from OPDS Plus and the built-in OPDS plugin can be selected with **Saved catalogs** on the login screen.
+4. The built-in **OPDS** plugin's UI does not need to be enabled. MediaCat uses browser modules installed with KOReader and its built-in download workflow. Existing saved catalogs from OPDS Plus and the built-in OPDS plugin can be selected with **Saved catalogs** on the login screen.
 
 ### Wireless install on Kindle (SFTP)
 
@@ -36,7 +36,7 @@ To remove MediaCat, disable it in Plugin management or delete `opds_home.koplugi
 
 ### Redeploy from a source checkout
 
-From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It syncs MediaCat and the matching OPDS browser modules to `root@192.168.0.58:2222`, under `/mnt/us/koreader`. The script uses `~/.ssh/id_ed25519_koreader_kindle` when present. Set `KINDLE_HOST`, `KINDLE_PORT`, `KINDLE_USER`, or `KINDLE_KOREADER_DIR` to override those defaults. Restart KOReader after deployment.
+From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It syncs MediaCat to `root@192.168.0.58:2222`, under `/mnt/us/koreader`, and leaves KOReader's bundled OPDS browser modules in place. The script uses `~/.ssh/id_ed25519_koreader_kindle` when present. Set `KINDLE_HOST`, `KINDLE_PORT`, `KINDLE_USER`, or `KINDLE_KOREADER_DIR` to override those defaults. Restart KOReader after deployment.
 
 ## Try it
 
@@ -54,7 +54,7 @@ The URL, username, and password are saved locally in `settings/opds_home.lua` as
 - Grid covers come from OPDS image or thumbnail links. Entries without a cover show a placeholder.
 - Only HTTP and HTTPS feed URLs are accepted. Authentication uses KOReader's built-in OPDS client behavior, including HTTP Basic authentication and catalog cookies. KOReader's client advertises OPDS 2.0 before Atom/OPDS 1.x; if the OPDS 2.0 response cannot be parsed, MediaCat retries with Atom preferred.
 - Book taps use KOReader's existing OPDS download flow and download directory settings.
-- MediaCat reuses internal modules from the built-in OPDS plugin, so keep it paired with the KOReader version you are testing. The built-in OPDS plugin's UI does not need to be enabled. OPDS Plus is a separate implementation and does not provide those modules.
+- MediaCat reuses internal modules from the built-in OPDS plugin, so it must work with the modules bundled in the installed KOReader version. The deployment script updates only MediaCat and preserves those bundled modules. The built-in OPDS plugin's UI does not need to be enabled. OPDS Plus is a separate implementation and does not provide those modules.
 - The first version does not add search, facets, borrowing, or OPDS page streaming to the custom browser. The built-in OPDS browser remains available from the Search menu.
 - **Local files** returns to KOReader's normal FileManager at its current folder. It shows local storage, not a downloaded-books-only list; OPDS downloads go to KOReader's configured download folder.
 - The catalog breadcrumb is not currently written into downloaded books or their KOReader metadata. If preserving catalog categories matters, the maintainable approach is a small local source record keyed by downloaded file, with catalog and breadcrumb fields, then expose it as filters in a dedicated downloads view.

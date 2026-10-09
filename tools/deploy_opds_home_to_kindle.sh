@@ -48,14 +48,6 @@ trap 'rm -f "$batch_file"' EXIT
     printf 'put %s %s\n' \
         "$(sftp_quote "$repo_root/plugins/opds_home.koplugin/README.md")" \
         "$(sftp_quote "$remote_home/README.md")"
-    printf 'put %s %s\n' \
-        "$(sftp_quote "$repo_root/plugins/opds.koplugin/opdsbrowser.lua")" \
-        "$(sftp_quote "$remote_plugins/opds.koplugin/opdsbrowser.lua")"
-    for module in cookiejar.lua opdsclient.lua opdsparser.lua opdspse.lua; do
-        printf 'put %s %s\n' \
-            "$(sftp_quote "$repo_root/plugins/opds.koplugin/$module")" \
-            "$(sftp_quote "$remote_plugins/opds.koplugin/$module")"
-    done
 } > "$batch_file"
 
 printf 'Syncing MediaCat to %s@%s:%s over SFTP port %s\n' \
