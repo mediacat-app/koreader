@@ -940,7 +940,11 @@ end
 
 function OPDSHome:confirmDownloadAndOpen(item)
     local ConfirmBox = require("ui/widget/confirmbox")
-    local _, acquisition, path = self:getDownloadInfo(item)
+    local existing_file, acquisition, path = self:getDownloadInfo(item)
+    if existing_file then
+        self:openDownloadedFile(existing_file)
+        return
+    end
     if not acquisition then
         UIManager:show(InfoMessage:new{
             text = T(_("No downloadable book format was found for %1."), item.title or item.text or ""),
