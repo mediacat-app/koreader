@@ -52,6 +52,7 @@ The URL, username, and password are saved locally in `settings/opds_home.lua` as
 
 - The browser displays catalog links in a list and only switches to the cover grid at a leaf feed.
 - Grid covers come from OPDS image or thumbnail links. Entries without a cover show a placeholder.
+- The cover grid follows each OPDS `next` link as you page forward, with no client-side page limit. When a feed omits its total count, the footer reports how many books have been loaded and whether more pages are available.
 - Only HTTP and HTTPS feed URLs are accepted. Authentication uses KOReader's built-in OPDS client behavior, including HTTP Basic authentication and catalog cookies. KOReader's client advertises OPDS 2.0 before Atom/OPDS 1.x; if the OPDS 2.0 response cannot be parsed, MediaCat retries with Atom preferred.
 - Book taps use KOReader's existing OPDS download flow and download directory settings.
 - MediaCat reuses internal modules from the built-in OPDS plugin, so it must work with the modules bundled in the installed KOReader version. The deployment script updates only MediaCat and preserves those bundled modules. The built-in OPDS plugin's UI does not need to be enabled. OPDS Plus is a separate implementation and does not provide those modules.

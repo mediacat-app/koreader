@@ -226,7 +226,13 @@ function CoverGrid:init()
     if #self.items == 0 then
         footer_text = _("No books in this catalog")
     else
-        footer_text = T(_("%1–%2 of %3 books"), first, last, #self.items)
+        if self.total_count then
+            footer_text = T(_("%1–%2 of %3 books"), first, last, self.total_count)
+        elseif has_more then
+            footer_text = T(_("%1–%2 of %3 books loaded"), first, last, #self.items)
+        else
+            footer_text = T(_("%1–%2 of %3 books"), first, last, #self.items)
+        end
     end
     if has_more and self.page == total_pages then
         footer_text = footer_text .. "  ·  " .. _("More available")
@@ -689,6 +695,10 @@ function OPDSHome:readFeed(feed_url, fallback_title)
             return logMediaCatError("feed normalization", err)
         end)
         if ok_items then
+            local feed = parsed_catalog.feed or parsed_catalog
+            local metadata = parsed_catalog.metadata
+            items.total_count = tonumber(metadata and metadata.numberOfItems)
+                or tonumber(feed["opensearch:totalResults"])
             return items
         end
         return nil, tostring(items)
@@ -754,6 +764,7 @@ function OPDSHome:openCatalog(feed_url, title, push_history)
             title = feed_title or title or _("OPDS catalog"),
             items = items,
             hrefs = items.hrefs,
+            total_count = items.total_count,
         }
         logger.info("MediaCat: rendering catalog screen")
         self:renderState(self.current_state)
@@ -921,6 +932,7 @@ function OPDSHome:loadMore(state, on_done)
             table.insert(state.items, item)
         end
         state.hrefs = items.hrefs
+        state.total_count = items.total_count or state.total_count
         if state == self.current_state then
             self.current_state = state
         end
@@ -953,6 +965,7 @@ function OPDSHome:showGrid(state, page)
         title = state.title,
         items = state.items,
         page = page,
+        total_count = state.total_count,
         has_more = state.hrefs and state.hrefs.next,
         load_cover = function(item, width, height) return self:loadCover(item, width, height) end,
         find_downloaded_file = function(item) return self:findDownloadedFile(item) end,
