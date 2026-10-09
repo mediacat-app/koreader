@@ -36,7 +36,7 @@ To remove MediaCat, disable it in Plugin management or delete `opds_home.koplugi
 
 ### Redeploy from a source checkout
 
-From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It syncs MediaCat and its shared OPDS browser module to `root@192.168.0.58:2222`, under `/mnt/us/koreader`. The script uses `~/.ssh/id_ed25519_koreader_kindle` when present. Set `KINDLE_HOST`, `KINDLE_PORT`, `KINDLE_USER`, or `KINDLE_KOREADER_DIR` to override those defaults. Restart KOReader after deployment.
+From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It syncs MediaCat and the matching OPDS browser modules to `root@192.168.0.58:2222`, under `/mnt/us/koreader`. The script uses `~/.ssh/id_ed25519_koreader_kindle` when present. Set `KINDLE_HOST`, `KINDLE_PORT`, `KINDLE_USER`, or `KINDLE_KOREADER_DIR` to override those defaults. Restart KOReader after deployment.
 
 ## Try it
 

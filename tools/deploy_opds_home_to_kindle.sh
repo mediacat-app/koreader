@@ -51,9 +51,14 @@ trap 'rm -f "$batch_file"' EXIT
     printf 'put %s %s\n' \
         "$(sftp_quote "$repo_root/plugins/opds.koplugin/opdsbrowser.lua")" \
         "$(sftp_quote "$remote_plugins/opds.koplugin/opdsbrowser.lua")"
+    for module in cookiejar.lua opdsclient.lua opdsparser.lua opdspse.lua; do
+        printf 'put %s %s\n' \
+            "$(sftp_quote "$repo_root/plugins/opds.koplugin/$module")" \
+            "$(sftp_quote "$remote_plugins/opds.koplugin/$module")"
+    done
 } > "$batch_file"
 
-printf 'Syncing OPDS Home to %s@%s:%s over SFTP port %s\n' \
+printf 'Syncing MediaCat to %s@%s:%s over SFTP port %s\n' \
     "$kindle_user" "$kindle_host" "$koreader_dir" "$kindle_port"
 kindle_password="${KINDLE_PASSWORD:-}"
 if [[ -z "$kindle_password" && ! -f "$kindle_key" && -r /dev/tty ]] && command -v sshpass >/dev/null 2>&1; then
