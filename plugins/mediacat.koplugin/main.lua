@@ -63,6 +63,52 @@ local function perfEndpoint(raw_url)
         parsed.port and ":" .. parsed.port or "", path)
 end
 
+local function hasSimpleUrlPath(path)
+    if path:find("//", 1, true) then
+        return false
+    end
+    for segment in path:gmatch("[^/]+") do
+        if segment == "." or segment == ".." then
+            return false
+        end
+    end
+    return true
+end
+
+local function fastAbsoluteUrl(base_url, relative_url, parsed_bases)
+    if type(base_url) ~= "string" or type(relative_url) ~= "string"
+            or relative_url == "" or relative_url:find("[?#;]")
+            or relative_url:match("^[%a][%w+%.%-]*:") or relative_url:sub(1, 2) == "//"
+            or not hasSimpleUrlPath(relative_url) then
+        return false
+    end
+
+    local base = parsed_bases[base_url]
+    if base == nil then
+        local parsed = socket_url.parse(base_url)
+        local path = parsed and parsed.path or ""
+        base = { safe = parsed ~= nil and parsed.scheme ~= nil and parsed.authority ~= nil
+            and parsed.params == nil and parsed.query == nil and parsed.fragment == nil
+            and hasSimpleUrlPath(path) }
+        if base.safe then
+            base.origin = parsed.scheme .. "://" .. parsed.authority
+            base.directory = path:gsub("[^/]*$", "")
+            if not base.directory:match("/$") then
+                base.directory = base.directory .. "/"
+            end
+        end
+        parsed_bases[base_url] = base
+    end
+    if not base.safe then
+        return false
+    end
+
+    if relative_url:sub(1, 1) == "/" then
+        return true, base.origin .. relative_url
+    end
+    return true, base.origin .. base.directory .. relative_url
+end
+
 local function logMediaCatPerf(format, ...)
     logger.info("MediaCat perf: " .. string.format(format, ...))
 end
@@ -996,10 +1042,22 @@ function OPDSHome:readFeed(feed_url, fallback_title)
         end
         local url_absolute_calls = 0
         local url_absolute_ms = 0
+        local url_absolute_fast_calls = 0
+        local url_absolute_fallback_calls = 0
+        local parsed_url_bases = {}
         local original_url_absolute = socket_url.absolute
-        socket_url.absolute = function(...)
+        socket_url.absolute = function(base_url, relative_url, ...)
             local absolute_started = perfNow()
-            local result = original_url_absolute(...)
+            local fast, result
+            if select("#", ...) == 0 then
+                fast, result = fastAbsoluteUrl(base_url, relative_url, parsed_url_bases)
+            end
+            if fast then
+                url_absolute_fast_calls = url_absolute_fast_calls + 1
+            else
+                url_absolute_fallback_calls = url_absolute_fallback_calls + 1
+                result = original_url_absolute(base_url, relative_url, ...)
+            end
             url_absolute_calls = url_absolute_calls + 1
             url_absolute_ms = url_absolute_ms + perfElapsedMs(absolute_started)
             return result
@@ -1036,9 +1094,10 @@ function OPDSHome:readFeed(feed_url, fallback_title)
         helper.getSearchTemplate = search_template_override
         socket_url.absolute = original_url_absolute
         DocumentRegistry.hasProvider = original_has_provider
-        logMediaCatPerf("feed_normalize_detail endpoint=%s entries=%d entry_links=%d url_absolute_calls=%d url_absolute_ms=%.3f provider_lookup_calls=%d provider_lookup_ms=%.3f search_template_calls=%d search_template_ms=%.3f",
+        logMediaCatPerf("feed_normalize_detail endpoint=%s entries=%d entry_links=%d url_absolute_calls=%d url_absolute_fast_calls=%d url_absolute_fallback_calls=%d url_absolute_ms=%.3f provider_lookup_calls=%d provider_lookup_ms=%.3f search_template_calls=%d search_template_ms=%.3f",
             perfEndpoint(feed_url), #entries, entry_link_count, url_absolute_calls,
-            url_absolute_ms, provider_lookup_calls, provider_lookup_ms,
+            url_absolute_fast_calls, url_absolute_fallback_calls, url_absolute_ms,
+            provider_lookup_calls, provider_lookup_ms,
             search_template_calls, search_template_ms)
         if ok_items then
             local metadata = parsed_catalog.metadata
