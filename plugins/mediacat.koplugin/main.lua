@@ -1528,6 +1528,14 @@ function OPDSHome:showOptions(anchor_menu)
                     self:showLogin()
                 end,
             }},
+            {{
+                text = _("Restart KOReader"),
+                align = "left",
+                callback = function()
+                    UIManager:close(dialog)
+                    UIManager:askForRestart(_("Restart KOReader now?"))
+                end,
+            }},
         },
         shrink_unneeded_width = true,
     }
