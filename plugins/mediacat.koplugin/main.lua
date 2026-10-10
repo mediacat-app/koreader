@@ -75,11 +75,38 @@ local function hasSimpleUrlPath(path)
     return true
 end
 
+local function hasSimpleAbsoluteUrlPath(raw_url)
+    local authority_and_path = raw_url:match("^[%a][%w+%.%-]*://(.+)$")
+    if not authority_and_path then
+        return false
+    end
+    local path_start = authority_and_path:find("/", 1, true)
+    local query_start = authority_and_path:find("[?#]")
+    if not path_start or (query_start and query_start < path_start) then
+        return true
+    end
+    local path = authority_and_path:sub(path_start):match("^([^?#]*)") or ""
+    return hasSimpleUrlPath(path)
+end
+
 local function fastAbsoluteUrl(base_url, relative_url, parsed_bases)
-    if type(base_url) ~= "string" or type(relative_url) ~= "string"
-            or relative_url == "" or relative_url:find("[?#;]")
-            or relative_url:match("^[%a][%w+%.%-]*:") or relative_url:sub(1, 2) == "//"
-            or not hasSimpleUrlPath(relative_url) then
+    if type(relative_url) ~= "string" or relative_url == "" then
+        return false
+    end
+
+    -- Absolute references need no base URL. Keep LuaSocket's general path
+    -- normalization for paths containing dot or duplicate slash segments.
+    if relative_url:match("^[%a][%w+%.%-]*:") then
+        if hasSimpleAbsoluteUrlPath(relative_url) then
+            return true, relative_url
+        end
+        return false
+    end
+
+    local relative_path = relative_url:match("^([^?#]*)")
+    if type(base_url) ~= "string" or relative_url:sub(1, 2) == "//"
+            or not relative_path or relative_path == "" or relative_path:find(";", 1, true)
+            or not hasSimpleUrlPath(relative_path) then
         return false
     end
 
