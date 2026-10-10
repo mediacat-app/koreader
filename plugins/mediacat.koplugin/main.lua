@@ -252,6 +252,30 @@ function CoverTile:init()
     end
 
     local title = self.item.title or self.item.text or _("Untitled")
+    local title_widget = TextBoxWidget:new{
+        text = title,
+        face = Font:getFace("smallinfofont", 15),
+        bold = true,
+        alignment = "center",
+        width = inner_width,
+        height = title_text_height,
+        height_adjust = true,
+        height_overflow_show_ellipsis = true,
+    }
+    local caption_widgets = { title_widget }
+    if author and author ~= "" then
+        table.insert(caption_widgets, TextBoxWidget:new{
+            text = author,
+            face = Font:getFace("smallinfofont", 12),
+            fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            alignment = "center",
+            width = inner_width,
+            height = author_height,
+            height_adjust = true,
+            height_overflow_show_ellipsis = true,
+        })
+    end
+    local caption_group = VerticalGroup:new(caption_widgets)
 
     self[1] = FrameContainer:new{
         bordersize = border,
@@ -263,31 +287,9 @@ function CoverTile:init()
                 dimen = Geom:new{ w = inner_width, h = cover_height },
                 cover_area,
             },
-            VerticalGroup:new{
-                CenterContainer:new{
-                    dimen = Geom:new{ w = inner_width, h = title_text_height },
-                    TextBoxWidget:new{
-                        text = title,
-                        face = Font:getFace("smallinfofont", 15),
-                        bold = true,
-                        alignment = "center",
-                        width = inner_width,
-                        height = title_text_height,
-                        height_overflow_show_ellipsis = true,
-                    },
-                },
-                author and author ~= "" and CenterContainer:new{
-                    dimen = Geom:new{ w = inner_width, h = author_height },
-                    TextBoxWidget:new{
-                        text = author,
-                        face = Font:getFace("smallinfofont", 12),
-                        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
-                        alignment = "center",
-                        width = inner_width,
-                        height = author_height,
-                        height_overflow_show_ellipsis = true,
-                    },
-                } or nil,
+            CenterContainer:new{
+                dimen = Geom:new{ w = inner_width, h = title_height },
+                caption_group,
             },
         },
     }
