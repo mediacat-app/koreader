@@ -933,6 +933,48 @@ function OPDSHome:readFeed(feed_url, fallback_title)
     helper.catalog_title = fallback_title
     logger.info("MediaCat: fetching catalog feed")
     local helper_parse_started = perfNow()
+    local fetch_feed_override = rawget(helper, "fetchFeed")
+    local fetch_feed = helper.fetchFeed
+    local opds_parser = require("opdsparser")
+    local parse_atom = opds_parser.parse
+    local json = require("json")
+    local decode_json = json.decode
+    local last_fetched_url
+    helper.fetchFeed = function(browser, requested_url, ...)
+        local fetch_started = perfNow()
+        local fetch_ok, body, headers, status = pcall(fetch_feed, browser, requested_url, ...)
+        local fetch_ms = perfElapsedMs(fetch_started)
+        last_fetched_url = requested_url
+        logMediaCatPerf("feed_http_fetch endpoint=%s status=%s outcome=%s bytes=%d total_ms=%.3f",
+            perfEndpoint(requested_url), tostring(status or "no_status"),
+            fetch_ok and "ok" or "failed", type(body) == "string" and #body or 0, fetch_ms)
+        if not fetch_ok then
+            error(body, 0)
+        end
+        return body, headers, status
+    end
+    opds_parser.parse = function(parser, body)
+        local parse_started = perfNow()
+        local parse_ok, catalog = pcall(parse_atom, parser, body)
+        logMediaCatPerf("feed_atom_parse endpoint=%s bytes=%d outcome=%s total_ms=%.3f",
+            perfEndpoint(last_fetched_url), type(body) == "string" and #body or 0,
+            parse_ok and "ok" or "failed", perfElapsedMs(parse_started))
+        if not parse_ok then
+            error(catalog, 0)
+        end
+        return catalog
+    end
+    json.decode = function(body, ...)
+        local parse_started = perfNow()
+        local parse_ok, catalog = pcall(decode_json, body, ...)
+        logMediaCatPerf("feed_json_parse endpoint=%s bytes=%d outcome=%s total_ms=%.3f",
+            perfEndpoint(last_fetched_url), type(body) == "string" and #body or 0,
+            parse_ok and "ok" or "failed", perfElapsedMs(parse_started))
+        if not parse_ok then
+            error(catalog, 0)
+        end
+        return catalog
+    end
     local ok, catalog = xpcall(function()
         return helper:parseFeed(feed_url)
     end, function(err)
@@ -946,6 +988,43 @@ function OPDSHome:readFeed(feed_url, fallback_title)
             return nil
         end
         local normalize_started = perfNow()
+        local feed = parsed_catalog.feed or parsed_catalog
+        local entries = feed.entry or {}
+        local entry_link_count = 0
+        for _, entry in ipairs(entries) do
+            entry_link_count = entry_link_count + #(entry.link or {})
+        end
+        local url_absolute_calls = 0
+        local url_absolute_ms = 0
+        local original_url_absolute = socket_url.absolute
+        socket_url.absolute = function(...)
+            local absolute_started = perfNow()
+            local result = original_url_absolute(...)
+            url_absolute_calls = url_absolute_calls + 1
+            url_absolute_ms = url_absolute_ms + perfElapsedMs(absolute_started)
+            return result
+        end
+        local provider_lookup_calls = 0
+        local provider_lookup_ms = 0
+        local original_has_provider = DocumentRegistry.hasProvider
+        DocumentRegistry.hasProvider = function(registry, ...)
+            local lookup_started = perfNow()
+            local result = original_has_provider(registry, ...)
+            provider_lookup_calls = provider_lookup_calls + 1
+            provider_lookup_ms = provider_lookup_ms + perfElapsedMs(lookup_started)
+            return result
+        end
+        local search_template_calls = 0
+        local search_template_ms = 0
+        local search_template_override = rawget(helper, "getSearchTemplate")
+        local get_search_template = helper.getSearchTemplate
+        helper.getSearchTemplate = function(browser, ...)
+            local search_started = perfNow()
+            local result = get_search_template(browser, ...)
+            search_template_calls = search_template_calls + 1
+            search_template_ms = search_template_ms + perfElapsedMs(search_started)
+            return result
+        end
         local ok_items, items = xpcall(function()
             if parsed_catalog.is_opds2 then
                 return helper:genItemTableFromCatalog2(parsed_catalog, feed_url)
@@ -954,8 +1033,14 @@ function OPDSHome:readFeed(feed_url, fallback_title)
         end, function(err)
             return logMediaCatError("feed normalization", err)
         end)
+        helper.getSearchTemplate = search_template_override
+        socket_url.absolute = original_url_absolute
+        DocumentRegistry.hasProvider = original_has_provider
+        logMediaCatPerf("feed_normalize_detail endpoint=%s entries=%d entry_links=%d url_absolute_calls=%d url_absolute_ms=%.3f provider_lookup_calls=%d provider_lookup_ms=%.3f search_template_calls=%d search_template_ms=%.3f",
+            perfEndpoint(feed_url), #entries, entry_link_count, url_absolute_calls,
+            url_absolute_ms, provider_lookup_calls, provider_lookup_ms,
+            search_template_calls, search_template_ms)
         if ok_items then
-            local feed = parsed_catalog.feed or parsed_catalog
             local metadata = parsed_catalog.metadata
             items.total_count = tonumber(metadata and metadata.numberOfItems)
                 or tonumber(feed["opensearch:totalResults"])
@@ -973,8 +1058,20 @@ function OPDSHome:readFeed(feed_url, fallback_title)
     local initial_error = not ok and tostring(catalog) or nil
     local items, item_error
     if ok then
-        items, item_error = makeItems(catalog)
+        local make_items_ok, make_items_result, make_items_error = xpcall(function()
+            return makeItems(catalog)
+        end, function(err)
+            return logMediaCatError("feed item creation", err)
+        end)
+        if make_items_ok then
+            items, item_error = make_items_result, make_items_error
+        else
+            item_error = tostring(make_items_result)
+        end
     end
+    helper.fetchFeed = fetch_feed_override
+    opds_parser.parse = parse_atom
+    json.decode = decode_json
     if items then
         logger.info("MediaCat: catalog parsed (items=" .. tostring(#items) .. ")")
         logMediaCatPerf("feed_read endpoint=%s outcome=ok item_count=%d total_ms=%.3f",
