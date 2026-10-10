@@ -30,6 +30,7 @@ local lfs = require("libs/libkoreader-lfs")
 local ltn12 = require("ltn12")
 local logger = require("logger")
 local mime = require("mime")
+local buffer = require("string.buffer")
 local socketutil = require("socketutil")
 local socket_url = require("socket.url")
 local time = require("ui/time")
@@ -1252,9 +1253,7 @@ function OPDSHome:showGrid(state, page)
     if target_count and has_more and not state.grid_loading and #state.items < target_count then
         UIManager:nextTick(function()
             if self.current_state == state and self.current_screen == grid then
-                Trapper:wrap(function()
-                    self:loadGridBatch(state, target_count, page)
-                end)
+                self:loadGridBatch(state, target_count, page)
             end
         end)
     end
@@ -1282,70 +1281,160 @@ function OPDSHome:loadGridBatch(state, target_count, page)
     end
 
     state.grid_loading = true
-    local loading = InfoMessage:new{ text = _("Loading more books…") }
-    UIManager:show(loading)
-    UIManager:forceRePaint()
+    UIManager:preventStandby()
+    local browser = self.opds_browser
+    local connection = self.connection or {}
+    local connection_url = connection.url
+    local connection_username = connection.username
+    local connection_password = connection.password
 
-    local changed = false
-    local ok, err = xpcall(function()
-        state.grid_pending_items = state.grid_pending_items or {}
-        state.grid_requested_urls = state.grid_requested_urls or {}
-        if state.url then
-            state.grid_requested_urls[state.url] = true
+    local pid, parent_read_fd = ffiUtil.runInSubProcess(function(_, child_write_fd)
+        local ok, result = xpcall(function()
+            local added_items = {}
+            local pending_items = state.grid_pending_items or {}
+            local hrefs = state.hrefs
+            local total_count = state.total_count
+            local requested_urls = state.grid_requested_urls or {}
+            local exhausted = state.grid_exhausted
+            local load_error
+
+            if state.url then
+                requested_urls[state.url] = true
+            end
+            while #state.items + #added_items < target_count do
+                local needed = target_count - #state.items - #added_items
+                while needed > 0 and #pending_items > 0 do
+                    table.insert(added_items, table.remove(pending_items, 1))
+                    needed = needed - 1
+                end
+                if #state.items + #added_items >= target_count then
+                    break
+                end
+
+                local next_url = hrefs and hrefs.next
+                if not next_url then
+                    exhausted = true
+                    break
+                end
+                if requested_urls[next_url] then
+                    logger.warn("MediaCat: repeated OPDS next link while loading grid results", next_url)
+                    exhausted = true
+                    break
+                end
+                requested_urls[next_url] = true
+
+                local items = self:readFeed(next_url, state.title)
+                if not items then
+                    requested_urls[next_url] = nil
+                    load_error = self.last_catalog_error or "could not load the next OPDS page"
+                    break
+                end
+                hrefs = items.hrefs
+                total_count = items.total_count or total_count
+                for _, item in ipairs(items) do
+                    table.insert(pending_items, item)
+                end
+                if #items == 0 and not (hrefs and hrefs.next) then
+                    exhausted = true
+                end
+            end
+
+            local cookies
+            if self.opds_browser and self.opds_browser.getHttpClient then
+                local client = self.opds_browser:getHttpClient()
+                cookies = client.cookie_jar and client.cookie_jar.cookies
+            end
+            return {
+                added_items = added_items,
+                pending_items = pending_items,
+                hrefs = hrefs,
+                total_count = total_count,
+                requested_urls = requested_urls,
+                exhausted = exhausted,
+                cookies = cookies,
+                error = load_error,
+            }
+        end, debug.traceback)
+        if not ok then
+            result = { error = result }
         end
-        while #state.items < target_count do
-            local needed = target_count - #state.items
-            while needed > 0 and #state.grid_pending_items > 0 do
-                table.insert(state.items, table.remove(state.grid_pending_items, 1))
-                needed = needed - 1
-                changed = true
-            end
-            if #state.items >= target_count then
-                break
-            end
-
-            local next_url = state.hrefs and state.hrefs.next
-            if not next_url then
-                state.grid_exhausted = true
-                break
-            end
-            if state.grid_requested_urls[next_url] then
-                logger.warn("MediaCat: repeated OPDS next link while loading grid results", next_url)
-                state.grid_exhausted = true
-                break
-            end
-            state.grid_requested_urls[next_url] = true
-
-            local items = self:readFeed(next_url, state.title)
-            if not items then
-                state.grid_requested_urls[next_url] = nil
-                error(self.last_catalog_error or "could not load the next OPDS page")
-            end
-            state.hrefs = items.hrefs
-            state.total_count = items.total_count or state.total_count
-            for _, item in ipairs(items) do
-                table.insert(state.grid_pending_items, item)
-            end
-            if #items == 0 and not (state.hrefs and state.hrefs.next) then
-                state.grid_exhausted = true
-            end
+        local encoded, serialized = pcall(buffer.encode, result)
+        if not encoded then
+            serialized = buffer.encode({ error = tostring(serialized) })
         end
-    end, function(load_error)
-        return logMediaCatError("loading grid results", load_error)
-    end)
+        ffiUtil.writeToFD(child_write_fd, serialized, true)
+    end, true)
 
-    UIManager:close(loading)
-    state.grid_loading = false
-    if not ok then
-        logger.warn("MediaCat: could not load the next grid batch:", err)
+    if not pid then
+        state.grid_loading = false
+        UIManager:allowStandby()
+        logger.warn("MediaCat: could not start background grid fetch:", parent_read_fd)
+        return
     end
+    state.grid_loading_pid = pid
 
-    if self.current_state == state and self.current_screen then
-        local current_page = self.current_screen.page or page
-        if changed then
+    local function finish(result)
+        state.grid_loading = false
+        state.grid_loading_pid = nil
+        UIManager:allowStandby()
+
+        if type(result) ~= "table" then
+            logger.warn("MediaCat: background grid fetch returned no result")
+            return
+        end
+        if result.error then
+            logger.warn("MediaCat: could not load the next grid batch:", result.error)
+            self.last_catalog_error = result.error
+        end
+
+        local changed = false
+        for _, item in ipairs(result.added_items or {}) do
+            table.insert(state.items, item)
+            changed = true
+        end
+        state.grid_pending_items = result.pending_items or {}
+        state.hrefs = result.hrefs
+        state.total_count = result.total_count or state.total_count
+        state.grid_requested_urls = result.requested_urls or state.grid_requested_urls
+        if result.exhausted ~= state.grid_exhausted then
+            changed = true
+        end
+        state.grid_exhausted = result.exhausted
+
+        if result.cookies and self.opds_browser == browser and self.connection
+                and self.connection.url == connection_url
+                and self.connection.username == connection_username
+                and self.connection.password == connection_password then
+            local client = browser:getHttpClient()
+            if client.cookie_jar then
+                client.cookie_jar.cookies = result.cookies
+            end
+        end
+
+        if changed and self.current_state == state and self.current_screen
+                and getmetatable(self.current_screen) == CoverGrid then
+            local current_page = self.current_screen.page or page
             self:showGrid(state, current_page)
         end
     end
+
+    local function pollBackgroundFetch()
+        local available = ffiUtil.getNonBlockingReadSize(parent_read_fd)
+        local completed = ffiUtil.isSubProcessDone(pid)
+        if completed or (available and available > 0) then
+            local serialized = ffiUtil.readAllFromFD(parent_read_fd)
+            local ok, result = pcall(buffer.decode, serialized)
+            if not ok then
+                logger.warn("MediaCat: could not decode background grid fetch result:", result)
+                finish(nil)
+            else
+                finish(result)
+            end
+            return
+        end
+        UIManager:scheduleIn(0.2, pollBackgroundFetch)
+    end
+    UIManager:scheduleIn(0.1, pollBackgroundFetch)
 end
 
 function OPDSHome:showConnectingCovers()
