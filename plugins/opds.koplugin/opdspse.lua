@@ -3,6 +3,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local logger = require("logger")
 local ltn12 = require("ltn12")
+local OPDSPerf = require("opdsperf")
 local RenderImage = require("ui/renderimage")
 local Screen = require("device").screen
 local socket = require("socket")
@@ -16,6 +17,7 @@ local OPDSPSE = {}
 
 -- This function attempts to pull chapter progress from Kavita.
 function OPDSPSE:getLastPage(remote_url, username, password)
+    local lookup_started = OPDSPerf.start()
     local last_page = 0
 
     -- create URL's and reference vars
@@ -29,6 +31,7 @@ function OPDSPSE:getLastPage(remote_url, username, password)
     local auth_data = {}
     local auth_code, auth_headers, auth_status
     if auth_parsed.scheme == "http" or auth_parsed.scheme == "https" then
+        local auth_started = OPDSPerf.start()
         socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
         auth_code, auth_headers, auth_status = socket.skip(1, http.request {
             method = "POST",
@@ -42,6 +45,11 @@ function OPDSPSE:getLastPage(remote_url, username, password)
             password    = password,
         })
         socketutil:reset_timeout()
+        local auth_bytes = 0
+        for _, chunk in ipairs(auth_data) do auth_bytes = auth_bytes + #chunk end
+        OPDSPerf.log("page_progress_request kind=auth endpoint=%s status=%s bytes=%d request_ms=%.3f",
+            OPDSPerf.endpoint(auth_url), tostring(auth_code or auth_status), auth_bytes,
+            OPDSPerf.elapsedMs(auth_started))
     else
         UIManager:show(InfoMessage:new {
             text = T(_("Invalid protocol:\n%1"), auth_parsed.scheme),
@@ -58,6 +66,7 @@ function OPDSPSE:getLastPage(remote_url, username, password)
         local progress_data = {}
         local progress_code, progress_headers, progress_status
         if progress_parsed.scheme == "http" or progress_parsed.scheme == "https" then
+            local progress_started = OPDSPerf.start()
             socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
             progress_code, progress_headers, progress_status = socket.skip(1, http.request {
                 url         = progress_url,
@@ -70,6 +79,11 @@ function OPDSPSE:getLastPage(remote_url, username, password)
                 password    = password,
             })
             socketutil:reset_timeout()
+            local progress_bytes = 0
+            for _, chunk in ipairs(progress_data) do progress_bytes = progress_bytes + #chunk end
+            OPDSPerf.log("page_progress_request kind=progress endpoint=%s status=%s bytes=%d request_ms=%.3f",
+                OPDSPerf.endpoint(progress_url), tostring(progress_code or progress_status), progress_bytes,
+                OPDSPerf.elapsedMs(progress_started))
         else
             UIManager:show(InfoMessage:new {
                 text = T(_("Invalid protocol:\n%1"), progress_parsed.scheme),
@@ -89,19 +103,27 @@ function OPDSPSE:getLastPage(remote_url, username, password)
     end
 
     -- returns page number. If the HTTP Requests were unsuccessful, defaults to 0.
+    OPDSPerf.log("page_progress_lookup endpoint=%s last_page=%s total_ms=%.3f",
+        OPDSPerf.endpoint(remote_url), tostring(last_page), OPDSPerf.elapsedMs(lookup_started))
     return last_page;
 end
 
 function OPDSPSE:streamPages(remote_url, count, continue, username, password, last_page_read)
+    local stream_started = OPDSPerf.start()
     -- attempt to pull chapter progress from Kavita if user pressed
     -- "Page Stream" button.
     -- We have to pull the progress here, otherwise the creation of the page_table
     -- will overwrite the book progress before we pull it, making it always 0.
+    local progress_started = OPDSPerf.start()
     local ok, last_page = pcall(function() return self:getLastPage(remote_url, username, password) end)
+    OPDSPerf.log("page_progress_result endpoint=%s outcome=%s total_ms=%.3f",
+        OPDSPerf.endpoint(remote_url), ok and "ok" or "ignored_error",
+        OPDSPerf.elapsedMs(progress_started))
     if not ok then
         logger.dbg("Couldn't pull progress, defaulting to Page 0.")
         last_page = 0
     end
+    local first_image_ready = false
     local page_table = {image_disposable = true}
     setmetatable(page_table, {__index = function (_, key)
         if type(key) ~= "number" then
@@ -112,12 +134,14 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
             local page_url = remote_url:gsub("{pageNumber}", tostring(index))
             page_url = page_url:gsub("{maxWidth}", tostring(Screen:getWidth()))
             local page_data = {}
+            local page_started = OPDSPerf.start()
 
             logger.dbg("Streaming page from", page_url)
             local parsed = url.parse(page_url)
 
             local code, headers, status
             if parsed.scheme == "http" or parsed.scheme == "https" then
+                local request_started = OPDSPerf.start()
                 socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
                 code, headers, status = socket.skip(1, http.request {
                     url         = page_url,
@@ -129,6 +153,41 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
                     password    = password,
                 })
                 socketutil:reset_timeout()
+                local request_ms = OPDSPerf.elapsedMs(request_started)
+                local join_started = OPDSPerf.start()
+                local data = table.concat(page_data)
+                local body_join_ms = OPDSPerf.elapsedMs(join_started)
+                if code == 200 then
+                    local decode_started = OPDSPerf.start()
+                    local page_bb = RenderImage:renderImageData(data, #data, false)
+                    local decode_ok = page_bb ~= nil
+                    page_bb = page_bb or RenderImage:renderImageFile("resources/koreader.png", false)
+                    OPDSPerf.log("image_page endpoint=%s page=%d status=%s bytes=%d request_ms=%.3f body_join_ms=%.3f decode_ms=%.3f decode_ok=%s total_ms=%.3f",
+                        OPDSPerf.endpoint(page_url), key, tostring(code), #data, request_ms,
+                        body_join_ms, OPDSPerf.elapsedMs(decode_started), tostring(decode_ok),
+                        OPDSPerf.elapsedMs(page_started))
+                    if not first_image_ready then
+                        first_image_ready = true
+                        OPDSPerf.log("image_first_ready endpoint=%s image_type=%s stream_open_ms=%.3f",
+                            OPDSPerf.endpoint(remote_url), count == 1 and "cover" or "page",
+                            OPDSPerf.elapsedMs(stream_started))
+                    end
+                    return page_bb
+                end
+
+                OPDSPerf.log("image_page endpoint=%s page=%d status=%s bytes=%d request_ms=%.3f body_join_ms=%.3f total_ms=%.3f outcome=failed",
+                    OPDSPerf.endpoint(page_url), key, tostring(code or status), #data, request_ms, body_join_ms,
+                    OPDSPerf.elapsedMs(page_started))
+                logger.dbg("OPDSBrowser:streamPages: Request failed:", status or code)
+                logger.dbg("OPDSBrowser:streamPages: Response headers:", headers)
+                local error_bb = RenderImage:renderImageFile("resources/koreader.png", false)
+                if not first_image_ready then
+                    first_image_ready = true
+                    OPDSPerf.log("image_first_ready endpoint=%s image_type=%s outcome=failed stream_open_ms=%.3f",
+                        OPDSPerf.endpoint(remote_url), count == 1 and "cover" or "page",
+                        OPDSPerf.elapsedMs(stream_started))
+                end
+                return error_bb
             else
                 UIManager:show(InfoMessage:new {
                     text = T(_("Invalid protocol:\n%1"), parsed.scheme),
@@ -136,16 +195,18 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
             end
 
             local data = table.concat(page_data)
-            if code == 200 then
-                local page_bb = RenderImage:renderImageData(data, #data, false)
-                             or RenderImage:renderImageFile("resources/koreader.png", false)
-                return page_bb
-            else
-                logger.dbg("OPDSBrowser:streamPages: Request failed:", status or code)
-                logger.dbg("OPDSBrowser:streamPages: Response headers:", headers)
-                local error_bb = RenderImage:renderImageFile("resources/koreader.png", false)
-                return error_bb
+            local decode_started = OPDSPerf.start()
+            local error_bb = RenderImage:renderImageFile("resources/koreader.png", false)
+            OPDSPerf.log("image_page endpoint=%s page=%d status=invalid_protocol bytes=%d decode_ms=%.3f total_ms=%.3f outcome=failed",
+                OPDSPerf.endpoint(page_url), key, #data, OPDSPerf.elapsedMs(decode_started),
+                OPDSPerf.elapsedMs(page_started))
+            if not first_image_ready then
+                first_image_ready = true
+                OPDSPerf.log("image_first_ready endpoint=%s image_type=%s outcome=failed stream_open_ms=%.3f",
+                    OPDSPerf.endpoint(remote_url), count == 1 and "cover" or "page",
+                    OPDSPerf.elapsedMs(stream_started))
             end
+            return error_bb
         end
     end})
     local ImageViewer = require("ui/widget/imageviewer")
@@ -157,6 +218,8 @@ function OPDSPSE:streamPages(remote_url, count, continue, username, password, la
         images_list_nb = count,
     }
     UIManager:show(viewer)
+    OPDSPerf.log("image_viewer_shown endpoint=%s image_count=%d setup_ms=%.3f",
+        OPDSPerf.endpoint(remote_url), count, OPDSPerf.elapsedMs(stream_started))
     if continue then
         self:jumpToPage(viewer, count)
     elseif last_page_read then

@@ -2,6 +2,7 @@ local http = require("socket.http")
 local socket = require("socket")
 local socketutil = require("socketutil")
 local url = require("socket.url")
+local OPDSPerf = require("opdsperf")
 
 local OPDSClient = {}
 OPDSClient.__index = OPDSClient
@@ -41,6 +42,7 @@ function OPDSClient:request(request)
     local request_url = request.url
     local original_headers = request.headers or {}
     local original_origin = url.parse(request_url)
+    local attempt_number = 0
 
     for _ = 1, 5 do
         local headers = {}
@@ -67,9 +69,21 @@ function OPDSClient:request(request)
             })
         end
 
+        attempt_number = attempt_number + 1
+        local attempt_started = OPDSPerf.start()
         local code, response_headers, status = makeRequest()
+        OPDSPerf.log("http_attempt attempt=%d endpoint=%s status=%s redirect=%s request_ms=%.3f",
+            attempt_number, OPDSPerf.endpoint(request_url), tostring(code or status),
+            tostring(redirect_codes[code] and response_headers and response_headers.location ~= nil),
+            OPDSPerf.elapsedMs(attempt_started))
         if code == socketutil.SSL_HANDSHAKE_CODE and isIdempotentRequest(request.method) then
+            attempt_number = attempt_number + 1
+            attempt_started = OPDSPerf.start()
             code, response_headers, status = makeRequest()
+            OPDSPerf.log("http_attempt attempt=%d endpoint=%s status=%s redirect=%s request_ms=%.3f retry=tls",
+                attempt_number, OPDSPerf.endpoint(request_url), tostring(code or status),
+                tostring(redirect_codes[code] and response_headers and response_headers.location ~= nil),
+                OPDSPerf.elapsedMs(attempt_started))
         end
         self.cookie_jar:store(request_url, response_headers)
 
