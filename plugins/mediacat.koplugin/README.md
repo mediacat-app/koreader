@@ -43,7 +43,7 @@ From the KOReader repository, run `./tools/deploy_opds_home_to_kindle.sh`. It sy
 1. On the FileManager screen, enter the root OPDS feed URL. Add a username and password if your server requires them.
 2. Tap **Login**. MediaCat fetches the feed and displays its libraries or catalog entries.
 3. Tap a library/folder to open it. In list view, tap **Load next catalog page…** to fetch another feed page.
-4. A feed with books and no child catalogs opens in a cover grid. Use the bottom **More** control for another feed page. Downloaded books show a down-arrow badge and open when tapped. Tapping a book that is not on the device asks whether to download and open it.
+4. A feed with books and no child catalogs opens in a cover grid. MediaCat loads results automatically in batches of ten grid pages and follows the feed's next links as needed. Downloaded books show a down-arrow badge and open when tapped. Tapping a book that is not on the device asks whether to download and open it.
 5. Use **Back** to move up the catalog, or open **Menu → Edit OPDS login** to change the connection. **Return to local files** closes the overlay and shows KOReader's normal FileManager.
 
 The URL, username, and password are saved locally in `settings/mediacat.lua` as soon as you submit the login, so a failed or interrupted connection does not make you re-enter them. The password is stored in that settings file in the same plain-text form used by KOReader's built-in OPDS catalog settings. Remove the saved connection by editing/deleting that file or clearing the plugin's settings through Plugin management.
@@ -53,7 +53,7 @@ The URL, username, and password are saved locally in `settings/mediacat.lua` as 
 - The browser displays catalog links in a list and only switches to the cover grid at a leaf feed.
 - Grid covers come from OPDS image or thumbnail links. Entries without a cover show a placeholder.
 - Visible-page covers download concurrently, and MediaCat prefetches the next grid page. The cover loading message appears only if the visible page still has missing covers after 500 ms.
-- The cover grid follows each OPDS `next` link as you page forward, with no client-side page limit. When a feed omits its total count, the footer reports how many books have been loaded and whether more pages are available.
+- OPDS feeds control their own response size and provide pagination through `next` links. MediaCat follows those links to fill ten grid pages at a time, keeps surplus entries for the following batch, and starts fetching the next batch on the ninth grid page. When a feed omits its total count, the footer reports how many books have been loaded.
 - Only HTTP and HTTPS feed URLs are accepted. Authentication uses KOReader's built-in OPDS client behavior, including HTTP Basic authentication and catalog cookies. KOReader's client advertises OPDS 2.0 before Atom/OPDS 1.x; if the OPDS 2.0 response cannot be parsed, MediaCat retries with Atom preferred.
 - Book downloads use KOReader's existing OPDS download workflow and download directory settings.
 - MediaCat reuses internal modules from the built-in OPDS plugin, so it must work with the modules bundled in the installed KOReader version. The deployment script updates only MediaCat and preserves those bundled modules. The built-in OPDS plugin's UI does not need to be enabled. OPDS Plus is a separate implementation and does not provide those modules.

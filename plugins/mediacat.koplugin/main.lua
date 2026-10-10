@@ -322,38 +322,35 @@ function CoverGrid:init()
             footer_text = T(_("%1–%2 of %3 books"), first, last, #self.items)
         end
     end
-    if has_more and self.page == total_pages then
-        footer_text = footer_text .. "  ·  " .. _("More available")
-    end
+    local footer_margin = Screen:scaleBySize(8)
+    local navigation_button_width = Screen:scaleBySize(112)
+    local footer_text_width = math.max(0, screen_w - 2 * footer_margin - 2 * navigation_button_width)
     local footer = CenterContainer:new{
         dimen = Geom:new{ w = screen_w, h = footer_h },
         HorizontalGroup:new{
+            HorizontalSpan:new{ width = footer_margin },
             Button:new{
                 text = _("Previous"),
-                width = Screen:scaleBySize(112),
+                width = navigation_button_width,
                 enabled = self.page > 1,
                 show_parent = self,
                 callback = function() self.on_page(self.page - 1) end,
             },
-            HorizontalSpan:new{ width = Screen:scaleBySize(12) },
-            TextWidget:new{
-                text = footer_text,
-                face = Font:getFace("smallinfofont", 16),
+            CenterContainer:new{
+                dimen = Geom:new{ w = footer_text_width, h = footer_h },
+                TextWidget:new{
+                    text = footer_text,
+                    face = Font:getFace("smallinfofont", 16),
+                },
             },
-            HorizontalSpan:new{ width = Screen:scaleBySize(12) },
             Button:new{
-                text = has_more and self.page == total_pages and _("More") or _("Next"),
-                width = Screen:scaleBySize(112),
-                enabled = self.page < total_pages or has_more,
+                text = _("Next"),
+                width = navigation_button_width,
+                enabled = self.page < total_pages,
                 show_parent = self,
-                callback = function()
-                    if self.page < total_pages then
-                        self.on_page(self.page + 1)
-                    else
-                        self.on_load_more(self.page)
-                    end
-                end,
+                callback = function() self.on_page(self.page + 1) end,
             },
+            HorizontalSpan:new{ width = footer_margin },
         },
     }
 
@@ -391,8 +388,6 @@ function CoverGrid:onPageNext()
     local total_pages = math.max(1, math.ceil(#self.items / self.per_page))
     if self.page < total_pages then
         self.on_page(self.page + 1)
-    elseif self.has_more then
-        self.on_load_more(self.page)
     end
     return true
 end
@@ -1212,6 +1207,8 @@ function OPDSHome:showGrid(state, page)
             end
         end)
     end
+    local has_more = not state.grid_exhausted and ((#(state.grid_pending_items or {}) > 0)
+        or (state.hrefs and state.hrefs.next ~= nil))
     local grid = CoverGrid:new{
         title = _("MediaCat"),
         can_go_back = #self.history > 0,
@@ -1219,7 +1216,7 @@ function OPDSHome:showGrid(state, page)
         page = page,
         total_count = state.total_count,
         empty_message = state.empty_message,
-        has_more = state.hrefs and state.hrefs.next,
+        has_more = has_more,
         load_cover = function(item, width, height) return self:loadCover(item, width, height) end,
         find_downloaded_file = function(item) return self:findDownloadedFile(item) end,
         on_select = function(item, file)
@@ -1232,15 +1229,6 @@ function OPDSHome:showGrid(state, page)
         on_back = function() self:goBack() end,
         on_menu = function() self:showOptions(grid) end,
         on_page = function(next_page) self:showGrid(state, next_page) end,
-        on_load_more = function(current_page)
-            self:loadMore(state, function()
-                -- Keep the current grid page. A server page can end partway
-                -- through a grid page (for example 50 entries on a 9-book
-                -- screen); the newly loaded entries should fill its remaining
-                -- slots before the user advances to the following grid page.
-                self:showGrid(state, current_page)
-            end)
-        end,
     }
     if loading then
         UIManager:close(loading)
@@ -1248,6 +1236,28 @@ function OPDSHome:showGrid(state, page)
     self.current_screen = grid
     UIManager:show(grid, "ui")
     UIManager:forceRePaint()
+
+    -- OPDS feeds choose their own response size and expose the next page as a
+    -- link. Build ten grid pages at a time, retaining any surplus entries from
+    -- a feed response for the next batch. Load the first batch after the first
+    -- screen is painted, then start each later batch on the ninth page so its
+    -- covers can be prefetched while the user views page ten.
+    local batch_size = per_page * 10
+    local target_count
+    if page == 1 and #state.items < batch_size then
+        target_count = batch_size
+    elseif page % 10 == 9 then
+        target_count = (math.floor((page - 1) / 10) + 2) * batch_size
+    end
+    if target_count and has_more and not state.grid_loading and #state.items < target_count then
+        UIManager:nextTick(function()
+            if self.current_state == state and self.current_screen == grid then
+                Trapper:wrap(function()
+                    self:loadGridBatch(state, target_count, page)
+                end)
+            end
+        end)
+    end
 
     local next_first = last + 1
     if next_first <= #state.items then
@@ -1263,6 +1273,78 @@ function OPDSHome:showGrid(state, page)
                 end)
             end
         end)
+    end
+end
+
+function OPDSHome:loadGridBatch(state, target_count, page)
+    if state.grid_loading or self.current_state ~= state then
+        return
+    end
+
+    state.grid_loading = true
+    local loading = InfoMessage:new{ text = _("Loading more books…") }
+    UIManager:show(loading)
+    UIManager:forceRePaint()
+
+    local changed = false
+    local ok, err = xpcall(function()
+        state.grid_pending_items = state.grid_pending_items or {}
+        state.grid_requested_urls = state.grid_requested_urls or {}
+        if state.url then
+            state.grid_requested_urls[state.url] = true
+        end
+        while #state.items < target_count do
+            local needed = target_count - #state.items
+            while needed > 0 and #state.grid_pending_items > 0 do
+                table.insert(state.items, table.remove(state.grid_pending_items, 1))
+                needed = needed - 1
+                changed = true
+            end
+            if #state.items >= target_count then
+                break
+            end
+
+            local next_url = state.hrefs and state.hrefs.next
+            if not next_url then
+                state.grid_exhausted = true
+                break
+            end
+            if state.grid_requested_urls[next_url] then
+                logger.warn("MediaCat: repeated OPDS next link while loading grid results", next_url)
+                state.grid_exhausted = true
+                break
+            end
+            state.grid_requested_urls[next_url] = true
+
+            local items = self:readFeed(next_url, state.title)
+            if not items then
+                state.grid_requested_urls[next_url] = nil
+                error(self.last_catalog_error or "could not load the next OPDS page")
+            end
+            state.hrefs = items.hrefs
+            state.total_count = items.total_count or state.total_count
+            for _, item in ipairs(items) do
+                table.insert(state.grid_pending_items, item)
+            end
+            if #items == 0 and not (state.hrefs and state.hrefs.next) then
+                state.grid_exhausted = true
+            end
+        end
+    end, function(load_error)
+        return logMediaCatError("loading grid results", load_error)
+    end)
+
+    UIManager:close(loading)
+    state.grid_loading = false
+    if not ok then
+        logger.warn("MediaCat: could not load the next grid batch:", err)
+    end
+
+    if self.current_state == state and self.current_screen then
+        local current_page = self.current_screen.page or page
+        if changed then
+            self:showGrid(state, current_page)
+        end
     end
 end
 
