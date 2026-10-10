@@ -40,6 +40,41 @@ local _ = require("gettext")
 local Screen = Device.screen
 local T = ffiUtil.template
 
+local function perfNow()
+    return time.monotonic()
+end
+
+local function perfElapsedMs(start_time)
+    return time.to_s(time.monotonic() - start_time) * 1000
+end
+
+local function perfEndpoint(raw_url)
+    if not raw_url then
+        return "<nil>"
+    end
+    local parsed = socket_url.parse(raw_url)
+    if not parsed or not parsed.host then
+        return "<invalid-url>"
+    end
+    local path = (parsed.path or "/"):gsub("([^/]+)", function(component)
+        return #component >= 24 and "<redacted>" or component
+    end)
+    return string.format("%s://%s%s%s", parsed.scheme or "?", parsed.host,
+        parsed.port and ":" .. parsed.port or "", path)
+end
+
+local function logMediaCatPerf(format, ...)
+    logger.info("MediaCat perf: " .. string.format(format, ...))
+end
+
+local function countChunkBytes(chunks)
+    local bytes = 0
+    for _, chunk in ipairs(chunks or {}) do
+        bytes = bytes + #chunk
+    end
+    return bytes
+end
+
 local function logMediaCatError(context, err)
     local message = tostring(err)
     local trace = debug and debug.traceback and debug.traceback(message, 2) or message
@@ -60,21 +95,34 @@ local function getCoverGridLayout()
         tile_width, tile_height, columns * rows
 end
 
-local function fetchCoverBatch(tasks, on_progress)
+local function fetchCoverBatch(tasks, on_progress, purpose)
+    local batch_started = perfNow()
     local ok, async = pcall(require, "httpasync")
     if not ok then
+        logMediaCatPerf("cover_parallel purpose=%s outcome=unavailable require_ms=%.3f",
+            purpose or "unspecified", perfElapsedMs(batch_started))
         return nil, async
     end
     local headers_by_url = {}
+    local task_indices = {}
     for _, task in ipairs(tasks) do
         headers_by_url[task.url] = task.headers
+        task_indices[task.url] = task.perf_index
     end
     local downloaded = {}
     local fetched, fetch_error = pcall(async.fetch_many, tasks, {
         concurrency = 8,
         get_url = function(task) return task.url end,
         fetch = function(image_url)
-            return async.fetch_url(image_url, 0, headers_by_url[image_url])
+            local request_started = perfNow()
+            local success, data, content_type = async.fetch_url(image_url, 0, headers_by_url[image_url])
+            local http_status = not success and type(data) == "string" and data:match("HTTP error (%d+)")
+                or (success and "not_exposed_by_httpasync" or "transport_error")
+            logMediaCatPerf("cover_request purpose=%s mode=parallel index=%s endpoint=%s http_status=%s bytes=%d request_ms=%.3f outcome=%s content_type=%s",
+                purpose or "unspecified", tostring(task_indices[image_url] or "?"),
+                perfEndpoint(image_url), tostring(http_status), success and type(data) == "string" and #data or 0,
+                perfElapsedMs(request_started), success and "ok" or "failed", tostring(content_type or "unknown"))
+            return success, data, content_type
         end,
         on_success = function(task, data)
             downloaded[task.url] = data
@@ -86,8 +134,12 @@ local function fetchCoverBatch(tasks, on_progress)
         on_progress = on_progress,
     })
     if not fetched then
+        logMediaCatPerf("cover_parallel purpose=%s outcome=failed request_count=%d total_ms=%.3f",
+            purpose or "unspecified", #tasks, perfElapsedMs(batch_started))
         return nil, fetch_error
     end
+    logMediaCatPerf("cover_parallel purpose=%s outcome=ok request_count=%d total_ms=%.3f",
+        purpose or "unspecified", #tasks, perfElapsedMs(batch_started))
     return downloaded
 end
 
@@ -239,6 +291,16 @@ local CoverGrid = InputContainer:extend{
     },
 }
 
+function CoverGrid:paintTo(bb, x, y)
+    local paint_started = self.perf_paint_pending and perfNow() or nil
+    InputContainer.paintTo(self, bb, x, y)
+    if paint_started then
+        self.perf_paint_pending = false
+        logMediaCatPerf("grid_widget_paint page=%d paint_ms=%.3f",
+            self.page or 1, perfElapsedMs(paint_started))
+    end
+end
+
 function CoverGrid:init()
     local screen_w, screen_h, header_h, footer_h, body_h, columns, rows,
         tile_width, tile_height, per_page = getCoverGridLayout()
@@ -286,14 +348,27 @@ function CoverGrid:init()
             local index = first + (row - 1) * self.columns + col - 1
             if index <= last then
                 local item = self.items[index]
-                table.insert(row_items, CoverTile:new{
+                local visible_index = index - first + 1
+                local cover_started = perfNow()
+                local cover = self.load_cover(item)
+                local cover_load_ms = perfElapsedMs(cover_started)
+                local lookup_started = perfNow()
+                local downloaded_file = self.find_downloaded_file(item)
+                local lookup_ms = perfElapsedMs(lookup_started)
+                local tile_started = perfNow()
+                local tile = CoverTile:new{
                     item = item,
-                    cover = self.load_cover(item),
-                    downloaded_file = self.find_downloaded_file(item),
+                    cover = cover,
+                    downloaded_file = downloaded_file,
                     width = self.tile_width,
                     height = self.tile_height,
                     on_select = self.on_select,
-                })
+                }
+                logMediaCatPerf("grid_tile page=%d visible_index=%d item_index=%d cover_source=%s cached_or_local_load_ms=%.3f download_lookup_ms=%.3f widget_create_ms=%.3f",
+                    self.page or 1, visible_index, index,
+                    item.local_path and "local" or (item.thumbnail or item.image) and "remote" or "none",
+                    cover_load_ms, lookup_ms, perfElapsedMs(tile_started))
+                table.insert(row_items, tile)
             else
                 table.insert(row_items, WidgetContainer:new{
                     dimen = Geom:new{ w = self.tile_width, h = self.tile_height },
@@ -823,23 +898,31 @@ function OPDSHome:parseAtomFallback(helper, feed_url)
 end
 
 function OPDSHome:readFeed(feed_url, fallback_title)
+    local read_started = perfNow()
     self.last_catalog_error = nil
     local helper = self:newOPDSBrowser()
     if not helper then
         self.last_catalog_error = _("KOReader's built-in OPDS plugin is unavailable.")
+        logMediaCatPerf("feed_read endpoint=%s outcome=unavailable total_ms=%.3f",
+            perfEndpoint(feed_url), perfElapsedMs(read_started))
         return nil
     end
     helper.catalog_title = fallback_title
     logger.info("MediaCat: fetching catalog feed")
+    local helper_parse_started = perfNow()
     local ok, catalog = xpcall(function()
         return helper:parseFeed(feed_url)
     end, function(err)
         return logMediaCatError("feed fetch and parse", err)
     end)
+    logMediaCatPerf("feed_helper_parse endpoint=%s outcome=%s total_ms=%.3f",
+        perfEndpoint(feed_url), ok and catalog and "ok" or "failed",
+        perfElapsedMs(helper_parse_started))
     local function makeItems(parsed_catalog)
         if not parsed_catalog then
             return nil
         end
+        local normalize_started = perfNow()
         local ok_items, items = xpcall(function()
             if parsed_catalog.is_opds2 then
                 return helper:genItemTableFromCatalog2(parsed_catalog, feed_url)
@@ -853,8 +936,14 @@ function OPDSHome:readFeed(feed_url, fallback_title)
             local metadata = parsed_catalog.metadata
             items.total_count = tonumber(metadata and metadata.numberOfItems)
                 or tonumber(feed["opensearch:totalResults"])
+            logMediaCatPerf("feed_normalize endpoint=%s format=%s outcome=ok item_count=%d total_ms=%.3f",
+                perfEndpoint(feed_url), parsed_catalog.is_opds2 and "opds2" or "atom",
+                #items, perfElapsedMs(normalize_started))
             return items
         end
+        logMediaCatPerf("feed_normalize endpoint=%s format=%s outcome=failed total_ms=%.3f",
+            perfEndpoint(feed_url), parsed_catalog.is_opds2 and "opds2" or "atom",
+            perfElapsedMs(normalize_started))
         return nil, tostring(items)
     end
 
@@ -865,6 +954,8 @@ function OPDSHome:readFeed(feed_url, fallback_title)
     end
     if items then
         logger.info("MediaCat: catalog parsed (items=" .. tostring(#items) .. ")")
+        logMediaCatPerf("feed_read endpoint=%s outcome=ok item_count=%d total_ms=%.3f",
+            perfEndpoint(feed_url), #items, perfElapsedMs(read_started))
         return items, helper.catalog_title or fallback_title
     end
 
@@ -873,15 +964,21 @@ function OPDSHome:readFeed(feed_url, fallback_title)
     -- after a successful HTTP response; don't mask network/authentication errors.
     if not helper.last_fetch_error and (not ok or not catalog
             or (type(catalog) == "table" and catalog.is_opds2)) then
+        local fallback_started = perfNow()
         local fallback_ok, fallback_catalog = xpcall(function()
             return self:parseAtomFallback(helper, feed_url)
         end, function(err)
             return logMediaCatError("Atom fallback", err)
         end)
+        logMediaCatPerf("feed_atom_fallback endpoint=%s outcome=%s total_ms=%.3f",
+            perfEndpoint(feed_url), fallback_ok and fallback_catalog and "ok" or "failed",
+            perfElapsedMs(fallback_started))
         if fallback_ok and fallback_catalog then
             helper.catalog_title = fallback_catalog.metadata and fallback_catalog.metadata.title or fallback_title
             local fallback_items, fallback_error = makeItems(fallback_catalog)
             if fallback_items then
+                logMediaCatPerf("feed_read endpoint=%s outcome=ok_via_fallback item_count=%d total_ms=%.3f",
+                    perfEndpoint(feed_url), #fallback_items, perfElapsedMs(read_started))
                 return fallback_items, helper.catalog_title or fallback_title
             end
             item_error = fallback_error
@@ -892,10 +989,13 @@ function OPDSHome:readFeed(feed_url, fallback_title)
 
     self.last_catalog_error = helper.last_fetch_error or item_error or initial_error
         or _("The server did not return a parseable Atom or OPDS 2.0 feed.")
+    logMediaCatPerf("feed_read endpoint=%s outcome=failed total_ms=%.3f",
+        perfEndpoint(feed_url), perfElapsedMs(read_started))
     return nil
 end
 
 function OPDSHome:openCatalog(feed_url, title, push_history)
+    local open_started = perfNow()
     local ok, result = xpcall(function()
         local parent = self.current_state
         if push_history and parent then
@@ -928,8 +1028,13 @@ function OPDSHome:openCatalog(feed_url, title, push_history)
     end)
     if not ok then
         self.last_catalog_error = result
+        logMediaCatPerf("catalog_open endpoint=%s outcome=exception total_ms=%.3f",
+            perfEndpoint(feed_url), perfElapsedMs(open_started))
         return false
     end
+    logMediaCatPerf("catalog_open endpoint=%s outcome=%s total_ms=%.3f",
+        perfEndpoint(feed_url), result and "ok" or "failed",
+        perfElapsedMs(open_started))
     return result
 end
 
@@ -1183,6 +1288,8 @@ function OPDSHome:goBack()
 end
 
 function OPDSHome:showGrid(state, page)
+    local grid_started = perfNow()
+    local setup_started = perfNow()
     self:closeCurrentScreen()
     local layout = { getCoverGridLayout() }
     local per_page = layout[10]
@@ -1200,16 +1307,23 @@ function OPDSHome:showGrid(state, page)
             has_uncached_cover = true
         end
     end
+    local visible_setup_ms = perfElapsedMs(setup_started)
+    logMediaCatPerf("grid_page_start page=%d loaded_items=%d visible_items=%d visible_uncached=%s setup_ms=%.3f",
+        page, #state.items, #page_items, tostring(has_uncached_cover), visible_setup_ms)
     local loading
     if has_uncached_cover then
+        local cover_stage_started = perfNow()
         self:fetchCovers(page_items, function()
             if not loading then
                 loading = self:showConnectingCovers()
             end
         end)
+        logMediaCatPerf("grid_visible_covers page=%d stage_ms=%.3f",
+            page, perfElapsedMs(cover_stage_started))
     end
     local has_more = not state.grid_exhausted and ((#(state.grid_pending_items or {}) > 0)
         or (state.hrefs and state.hrefs.next ~= nil))
+    local widget_build_started = perfNow()
     local grid = CoverGrid:new{
         title = _("MediaCat"),
         can_go_back = #self.history > 0,
@@ -1230,13 +1344,28 @@ function OPDSHome:showGrid(state, page)
         on_back = function() self:goBack() end,
         on_menu = function() self:showOptions(grid) end,
         on_page = function(next_page) self:showGrid(state, next_page) end,
+        perf_paint_pending = true,
     }
+    logMediaCatPerf("grid_widget_build page=%d visible_items=%d total_ms=%.3f",
+        page, #page_items, perfElapsedMs(widget_build_started))
     if loading then
         UIManager:close(loading)
     end
     self.current_screen = grid
+    local show_started = perfNow()
     UIManager:show(grid, "ui")
+    local ui_show_ms = perfElapsedMs(show_started)
+    local repaint_started = perfNow()
     UIManager:forceRePaint()
+    local repaint_ms = perfElapsedMs(repaint_started)
+    local refresh_wait_ms = 0
+    if Device:hasEinkScreen() then
+        local refresh_wait_started = perfNow()
+        UIManager:waitForVSync()
+        refresh_wait_ms = perfElapsedMs(refresh_wait_started)
+    end
+    logMediaCatPerf("grid_screen_ready page=%d ui_show_ms=%.3f paint_and_refresh_submit_ms=%.3f eink_refresh_wait_ms=%.3f total_ms=%.3f",
+        page, ui_show_ms, repaint_ms, refresh_wait_ms, perfElapsedMs(grid_started))
 
     -- OPDS feeds choose their own response size and expose the next page as a
     -- link. Build ten grid pages at a time, retaining any surplus entries from
@@ -1446,9 +1575,15 @@ function OPDSHome:loadGridBatch(state, target_count, page)
 end
 
 function OPDSHome:showConnectingCovers()
+    local overlay_started = perfNow()
     local message = InfoMessage:new{ text = _("Loading book covers…") }
+    local show_started = perfNow()
     UIManager:show(message)
+    local ui_show_ms = perfElapsedMs(show_started)
+    local repaint_started = perfNow()
     UIManager:forceRePaint()
+    logMediaCatPerf("cover_loading_overlay ui_show_ms=%.3f paint_and_refresh_submit_ms=%.3f total_ms=%.3f",
+        ui_show_ms, perfElapsedMs(repaint_started), perfElapsedMs(overlay_started))
     return message
 end
 
@@ -1483,10 +1618,11 @@ function OPDSHome:loadCover(item)
 end
 
 function OPDSHome:fetchCoverData(image_url)
+    local request_started = perfNow()
     if self.opds_browser.getHttpClient then
         local chunks = {}
         socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
-        local ok, code = pcall(function()
+        local ok, code, response_headers, request_status = pcall(function()
             return self.opds_browser:getHttpClient():request{
                 url = image_url,
                 method = "GET",
@@ -1497,15 +1633,30 @@ function OPDSHome:fetchCoverData(image_url)
             }
         end)
         socketutil:reset_timeout()
+        local request_ms = perfElapsedMs(request_started)
+        local body_join_ms = 0
+        local data
         if ok and code == 200 then
-            return table.concat(chunks)
+            local join_started = perfNow()
+            data = table.concat(chunks)
+            body_join_ms = perfElapsedMs(join_started)
         end
+        local bytes = data and #data or countChunkBytes(chunks)
+        local status = ok and (code or request_status or "no_status") or "transport_error"
+        logMediaCatPerf("cover_request mode=sequential endpoint=%s status=%s bytes=%d request_ms=%.3f body_join_ms=%.3f total_ms=%.3f outcome=%s",
+            perfEndpoint(image_url), tostring(status), bytes,
+            request_ms, body_join_ms, perfElapsedMs(request_started), data and "ok" or "failed")
+        return data
     elseif self.opds_browser.fetchFeed then
-        local ok, body = pcall(self.opds_browser.fetchFeed, self.opds_browser, image_url)
-        if ok then
-            return body
-        end
+        local ok, body, status = pcall(self.opds_browser.fetchFeed, self.opds_browser, image_url)
+        local bytes = type(body) == "string" and #body or 0
+        logMediaCatPerf("cover_request mode=opdsclient endpoint=%s status=%s bytes=%d fetch_and_body_join_ms=%.3f outcome=%s",
+            perfEndpoint(image_url), tostring(status or (ok and "ok" or "error")), bytes,
+            perfElapsedMs(request_started), ok and type(body) == "string" and "ok" or "failed")
+        return ok and body or nil
     end
+    logMediaCatPerf("cover_request endpoint=%s outcome=no_http_client total_ms=%.3f",
+        perfEndpoint(image_url), perfElapsedMs(request_started))
 end
 
 local function isSameOrigin(left_url, right_url)
@@ -1520,48 +1671,82 @@ local function isSameOrigin(left_url, right_url)
         and left_port == right_port
 end
 
-function OPDSHome:makeCoverFetchTasks(items)
+function OPDSHome:makeCoverFetchTasks(items, purpose)
+    local planning_started = perfNow()
     local tasks = {}
     local seen = {}
     local client = self.opds_browser.getHttpClient and self.opds_browser:getHttpClient()
     local cookie_jar = client and client.cookie_jar
-    for _, item in ipairs(items) do
+    local image_candidates = 0
+    local cached = 0
+    local duplicate_urls = 0
+    for item_index, item in ipairs(items) do
         local image_url = item.thumbnail or item.image
-        if image_url and self.cover_cache[image_url] == nil and not seen[image_url] then
-            seen[image_url] = true
-            local headers = { ["Accept-Encoding"] = "identity" }
-            if cookie_jar then
-                local cookie = cookie_jar:headerFor(image_url)
-                if cookie then headers.Cookie = cookie end
+        if image_url then
+            image_candidates = image_candidates + 1
+            if self.cover_cache[image_url] ~= nil then
+                cached = cached + 1
+            elseif seen[image_url] then
+                duplicate_urls = duplicate_urls + 1
+            else
+                seen[image_url] = true
+                local headers = { ["Accept-Encoding"] = "identity" }
+                if cookie_jar then
+                    local cookie = cookie_jar:headerFor(image_url)
+                    if cookie then headers.Cookie = cookie end
+                end
+                if self.connection.username and self.connection.password
+                        and isSameOrigin(self.connection.url, image_url) then
+                    headers.Authorization = "Basic " .. mime.b64(
+                        self.connection.username .. ":" .. self.connection.password)
+                end
+                table.insert(tasks, { url = image_url, headers = headers, perf_index = item_index })
             end
-            if self.connection.username and self.connection.password
-                    and isSameOrigin(self.connection.url, image_url) then
-                headers.Authorization = "Basic " .. mime.b64(
-                    self.connection.username .. ":" .. self.connection.password)
-            end
-            table.insert(tasks, { url = image_url, headers = headers })
         end
     end
+    logMediaCatPerf("cover_tasks purpose=%s items=%d image_candidates=%d cached=%d duplicate_urls=%d requests=%d planning_ms=%.3f",
+        purpose or "unspecified", #items, image_candidates, cached, duplicate_urls,
+        #tasks, perfElapsedMs(planning_started))
     return tasks
 end
 
-function OPDSHome:cacheCoverDownloads(tasks, downloaded)
-    for _, task in ipairs(tasks) do
+function OPDSHome:cacheCoverDownloads(tasks, downloaded, purpose)
+    local decode_batch_started = perfNow()
+    local decoded_count = 0
+    local failed_count = 0
+    for task_index, task in ipairs(tasks) do
         local data = downloaded and downloaded[task.url]
         if data then
             -- Keep the decoded image at its native dimensions so ImageWidget can
             -- fit it into the tile without changing the cover's aspect ratio.
-            local image = RenderImage:renderImageData(data, #data, false)
+            local decode_started = perfNow()
+            local decode_ok, image = pcall(RenderImage.renderImageData, RenderImage, data, #data, false)
+            logMediaCatPerf("cover_decode purpose=%s index=%s endpoint=%s bytes=%d decode_ms=%.3f outcome=%s",
+                purpose or "unspecified", tostring(task.perf_index or task_index),
+                perfEndpoint(task.url), #data, perfElapsedMs(decode_started), decode_ok and image and "ok" or "failed")
+            if not decode_ok then
+                error(image, 0)
+            end
             self.cover_cache[task.url] = image or false
+            if image then decoded_count = decoded_count + 1 else failed_count = failed_count + 1 end
         else
+            logMediaCatPerf("cover_decode purpose=%s index=%s endpoint=%s bytes=0 decode_ms=0 outcome=not_downloaded",
+                purpose or "unspecified", tostring(task.perf_index or task_index), perfEndpoint(task.url))
             self.cover_cache[task.url] = false
+            failed_count = failed_count + 1
         end
     end
+    logMediaCatPerf("cover_decode_batch purpose=%s requests=%d decoded=%d failed=%d total_ms=%.3f",
+        purpose or "unspecified", #tasks, decoded_count, failed_count,
+        perfElapsedMs(decode_batch_started))
 end
 
 function OPDSHome:fetchCovers(items, on_slow)
-    local tasks = self:makeCoverFetchTasks(items)
+    local visible_started = perfNow()
+    local tasks = self:makeCoverFetchTasks(items, "visible")
     if #tasks == 0 then
+        logMediaCatPerf("cover_visible outcome=cache_hit_or_no_images total_ms=%.3f",
+            perfElapsedMs(visible_started))
         return
     end
 
@@ -1575,33 +1760,45 @@ function OPDSHome:fetchCovers(items, on_slow)
         end
         return true
     end
-    local downloaded, err = fetchCoverBatch(tasks, on_progress)
+    local downloaded, err = fetchCoverBatch(tasks, on_progress, "visible")
     if not downloaded then
         logger.warn("MediaCat: parallel cover fetching failed; retrying sequentially:", err)
+        local fallback_started = perfNow()
         downloaded = {}
         for _, task in ipairs(tasks) do
             downloaded[task.url] = self:fetchCoverData(task.url) or false
         end
+        logMediaCatPerf("cover_sequential_fallback requests=%d total_ms=%.3f",
+            #tasks, perfElapsedMs(fallback_started))
     end
-    self:cacheCoverDownloads(tasks, downloaded)
+    self:cacheCoverDownloads(tasks, downloaded, "visible")
+    logMediaCatPerf("cover_visible outcome=complete requests=%d total_ms=%.3f",
+        #tasks, perfElapsedMs(visible_started))
 end
 
 function OPDSHome:prefetchCovers(items)
-    local tasks = self:makeCoverFetchTasks(items)
+    local prefetch_started = perfNow()
+    local tasks = self:makeCoverFetchTasks(items, "prefetch")
     if #tasks == 0 then
+        logMediaCatPerf("cover_prefetch outcome=cache_hit_or_no_images total_ms=%.3f",
+            perfElapsedMs(prefetch_started))
         return
     end
     local has_async = pcall(require, "httpasync")
     if not has_async then
+        logMediaCatPerf("cover_prefetch outcome=skipped reason=httpasync_unavailable requests=%d total_ms=%.3f",
+            #tasks, perfElapsedMs(prefetch_started))
         return
     end
     local completed, downloaded = Trapper:dismissableRunInSubprocess(function()
-        local results = fetchCoverBatch(tasks)
+        local results = fetchCoverBatch(tasks, nil, "prefetch")
         return results or {}
     end)
     if completed and type(downloaded) == "table" then
-        self:cacheCoverDownloads(tasks, downloaded)
+        self:cacheCoverDownloads(tasks, downloaded, "prefetch")
     end
+    logMediaCatPerf("cover_prefetch outcome=%s requests=%d total_ms=%.3f",
+        completed and "complete" or "cancelled", #tasks, perfElapsedMs(prefetch_started))
 end
 
 function OPDSHome:showOptions(anchor_menu)
