@@ -176,10 +176,16 @@ function CoverTile:init()
     self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
 
     local border = 0
-    local padding = Screen:scaleBySize(2)
+    local padding = Screen:scaleBySize(1)
     local inner_width = self.width - 2 * (border + padding)
     local inner_height = self.height - 2 * (border + padding)
-    local title_height = math.min(Screen:scaleBySize(58), math.floor(inner_height / 2))
+    local title_height = math.min(Screen:scaleBySize(56), math.floor(inner_height / 2))
+    local author_height = Screen:scaleBySize(16)
+    local title_text_height = title_height
+    local author = self.item.author
+    if author and author ~= "" then
+        title_text_height = title_height - author_height
+    end
     local cover_height = inner_height - title_height
     local cover_widget
 
@@ -246,9 +252,6 @@ function CoverTile:init()
     end
 
     local title = self.item.title or self.item.text or _("Untitled")
-    if self.item.author and self.item.author ~= "" then
-        title = title .. "\n" .. self.item.author
-    end
 
     self[1] = FrameContainer:new{
         bordersize = border,
@@ -260,13 +263,31 @@ function CoverTile:init()
                 dimen = Geom:new{ w = inner_width, h = cover_height },
                 cover_area,
             },
-            TextBoxWidget:new{
-                text = title,
-                face = Font:getFace("smallinfofont", 16),
-                alignment = "center",
-                width = inner_width,
-                height = title_height,
-                height_overflow_show_ellipsis = true,
+            VerticalGroup:new{
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner_width, h = title_text_height },
+                    TextBoxWidget:new{
+                        text = title,
+                        face = Font:getFace("smallinfofont", 15),
+                        bold = true,
+                        alignment = "center",
+                        width = inner_width,
+                        height = title_text_height,
+                        height_overflow_show_ellipsis = true,
+                    },
+                },
+                author and author ~= "" and CenterContainer:new{
+                    dimen = Geom:new{ w = inner_width, h = author_height },
+                    TextBoxWidget:new{
+                        text = author,
+                        face = Font:getFace("smallinfofont", 12),
+                        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+                        alignment = "center",
+                        width = inner_width,
+                        height = author_height,
+                        height_overflow_show_ellipsis = true,
+                    },
+                } or nil,
             },
         },
     }
