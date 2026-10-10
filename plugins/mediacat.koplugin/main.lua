@@ -1423,6 +1423,14 @@ function OPDSHome:loadGridBatch(state, target_count, page)
         local completed = ffiUtil.isSubProcessDone(pid)
         if completed or (available and available > 0) then
             local serialized = ffiUtil.readAllFromFD(parent_read_fd)
+            if not completed then
+                local function collectBackgroundFetch()
+                    if not ffiUtil.isSubProcessDone(pid) then
+                        UIManager:scheduleIn(0.2, collectBackgroundFetch)
+                    end
+                end
+                UIManager:scheduleIn(0.2, collectBackgroundFetch)
+            end
             local ok, result = pcall(buffer.decode, serialized)
             if not ok then
                 logger.warn("MediaCat: could not decode background grid fetch result:", result)
