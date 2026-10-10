@@ -14,7 +14,6 @@ local NetworkMgr = require("ui/network/manager")
 local Notification = require("ui/widget/notification")
 local OPDSClient = require("opdsclient")
 local OPDSParser = require("opdsparser")
-local OPDSPerf = require("opdsperf")
 local OPDSPSE = require("opdspse")
 local SpinWidget = require("ui/widget/spinwidget")
 local TextViewer = require("ui/widget/textviewer")
@@ -461,7 +460,6 @@ end
 
 -- Fetches feed from server
 function OPDSBrowser:fetchFeed(item_url, headers_only, extra_headers)
-    local request_started = OPDSPerf.start()
     self.last_fetch_error = nil
     local sink = {}
     socketutil:set_timeout(socketutil.LARGE_BLOCK_TIMEOUT, socketutil.LARGE_TOTAL_TIMEOUT)
@@ -486,29 +484,14 @@ function OPDSBrowser:fetchFeed(item_url, headers_only, extra_headers)
     socketutil:reset_timeout()
 
     if headers_only then
-        OPDSPerf.log("feed_request method=HEAD endpoint=%s status=%s bytes=0 request_ms=%.3f",
-            OPDSPerf.endpoint(item_url), tostring(code or status), OPDSPerf.elapsedMs(request_started))
         return headers
     end
     if code == 200 then
-        local join_started = OPDSPerf.start()
         local xml = table.concat(sink)
-        local join_ms = OPDSPerf.elapsedMs(join_started)
-        OPDSPerf.log("feed_request method=GET endpoint=%s status=%s bytes=%d request_ms=%.3f body_join_ms=%.3f",
-            OPDSPerf.endpoint(item_url), tostring(code), #xml, OPDSPerf.elapsedMs(request_started), join_ms)
         return xml ~= "" and xml, headers, code
     elseif code == 304 then
-        OPDSPerf.log("feed_request method=GET endpoint=%s status=%s bytes=0 request_ms=%.3f",
-            OPDSPerf.endpoint(item_url), tostring(code), OPDSPerf.elapsedMs(request_started))
         return nil, headers, code
     end
-
-    local response_bytes = 0
-    for _, chunk in ipairs(sink) do
-        response_bytes = response_bytes + #chunk
-    end
-    OPDSPerf.log("feed_request method=GET endpoint=%s status=%s bytes=%d request_ms=%.3f",
-        OPDSPerf.endpoint(item_url), tostring(code or status), response_bytes, OPDSPerf.elapsedMs(request_started))
 
     local text, icon
     if headers and code == 301 then
@@ -539,22 +522,17 @@ end
 
 -- Parses feed to catalog
 function OPDSBrowser:parseFeed(item_url)
-    local feed_started = OPDSPerf.start()
     local cache_key = "opds|catalog|" .. item_url
     local cache = self:getCatalogCache()
-    local cache_check_started = OPDSPerf.start()
     local cached_feed = cache:check(cache_key)
-    local cache_check_ms = OPDSPerf.elapsedMs(cache_check_started)
     local conditional_headers = self:getConditionalFeedHeaders(cached_feed)
     if conditional_headers then
         logger.dbg("Revalidating cache entry for", cache_key)
     end
 
     local feed, headers, code = self:fetchFeed(item_url, false, conditional_headers)
-    local feed_source = feed and "network" or "none"
     if code == 304 and cached_feed then
         feed = cached_feed.content
-        feed_source = "304_cache"
         logger.dbg("Cache hit for", cache_key)
     elseif feed and headers and (headers.etag or headers["last-modified"]) then
         cache:insert(cache_key, {
@@ -564,29 +542,18 @@ function OPDSBrowser:parseFeed(item_url)
         })
         logger.dbg("Caching", cache_key)
     end
-    if not feed then
-        OPDSPerf.log("feed_parse endpoint=%s source=%s outcome=no_feed cache_check_ms=%.3f total_ms=%.3f",
-            OPDSPerf.endpoint(item_url), feed_source, cache_check_ms, OPDSPerf.elapsedMs(feed_started))
-        return
-    end
-
-    local parse_started = OPDSPerf.start()
-    local format = feed:match("^%s*{") and "json" or "xml"
-    local parsed_catalog
-    if format == "json" then -- OPDS 2.0
-        local JSON = require("json")
-        local ret, result = pcall(JSON.decode, feed)
-        if ret then
-            result.is_opds2 = true
-            parsed_catalog = result
+    if feed then
+        if feed:match("^%s*{") then -- OPDS 2.0
+            local JSON = require("json")
+            local ret, result = pcall(JSON.decode, feed)
+            if ret then
+                result.is_opds2 = true
+                return result
+            end
+        else -- OPDS 1.x
+            return OPDSParser:parse(feed)
         end
-    else -- OPDS 1.x
-        parsed_catalog = OPDSParser:parse(feed)
     end
-    OPDSPerf.log("feed_parse endpoint=%s source=%s format=%s bytes=%d outcome=%s cache_check_ms=%.3f parse_ms=%.3f total_ms=%.3f",
-        OPDSPerf.endpoint(item_url), feed_source, format, #feed, parsed_catalog and "ok" or "failed",
-        cache_check_ms, OPDSPerf.elapsedMs(parse_started), OPDSPerf.elapsedMs(feed_started))
-    return parsed_catalog
 end
 
 function OPDSBrowser:getServerFileName(item_url, filetype)
@@ -642,30 +609,19 @@ end
 
 -- Generates menu items from the fetched list of catalog entries
 function OPDSBrowser:genItemTableFromURL(item_url)
-    local build_started = OPDSPerf.start()
     local ok, catalog = pcall(self.parseFeed, self, item_url)
-    local build_outcome = not ok and "parse_error" or (catalog and "ok" or "empty")
     if not ok then
-        OPDSPerf.log("catalog_build endpoint=%s outcome=parse_error total_ms=%.3f",
-            OPDSPerf.endpoint(item_url), OPDSPerf.elapsedMs(build_started))
         logger.info("Cannot get catalog info from", item_url, catalog)
         UIManager:show(InfoMessage:new{
             text = T(_("Cannot get catalog info from %1"), (item_url and BD.url(item_url) or "nil")),
         })
         catalog = nil
     end
-    local mapping_started = OPDSPerf.start()
-    local item_table
     if catalog and catalog.is_opds2 then
-        item_table = self:genItemTableFromCatalog2(catalog, item_url)
+        return self:genItemTableFromCatalog2(catalog, item_url)
     else
-        item_table = self:genItemTableFromCatalog(catalog, item_url)
+        return self:genItemTableFromCatalog(catalog, item_url)
     end
-    local format = catalog and (catalog.is_opds2 and "json" or "xml") or "unknown"
-    OPDSPerf.log("catalog_build endpoint=%s format=%s rows=%d outcome=%s mapping_ms=%.3f total_ms=%.3f",
-        OPDSPerf.endpoint(item_url), format, #item_table, build_outcome,
-        OPDSPerf.elapsedMs(mapping_started), OPDSPerf.elapsedMs(build_started))
-    return item_table
 end
 
 function OPDSBrowser:genItemTableFromCatalog2(catalog, item_url)
@@ -1066,10 +1022,7 @@ function OPDSBrowser:saveCatalogSnapshot()
 end
 
 function OPDSBrowser:setCatalogMenu(item_url, menu_table)
-    local menu_started = OPDSPerf.start()
     self:switchItemTable(self.catalog_title, menu_table)
-    OPDSPerf.log("menu_layout endpoint=%s rows=%d layout_ms=%.3f",
-        OPDSPerf.endpoint(item_url), #menu_table, OPDSPerf.elapsedMs(menu_started))
 
     -- Set appropriate title bar icon based on content
     if self.facet_groups or self.search_url then
@@ -1085,23 +1038,8 @@ function OPDSBrowser:setCatalogMenu(item_url, menu_table)
     end
 end
 
-function OPDSBrowser:paintTo(bb, x, y)
-    local ret = Menu.paintTo(self, bb, x, y)
-    local pending = self.perf_pending_first_paint
-    if pending then
-        OPDSPerf.log("menu_paint_ready source=%s endpoint=%s loaded_rows=%d visible_rows=%d paint_ready_ms=%.3f",
-            pending.source, pending.endpoint, pending.loaded_rows, pending.visible_rows,
-            OPDSPerf.elapsedMs(pending.started))
-        self.perf_pending_first_paint = nil
-    end
-    return ret
-end
-
 -- Requests and shows updated list of catalog entries
 function OPDSBrowser:updateCatalog(item_url, paths_updated)
-    local navigation_started = OPDSPerf.start()
-    OPDSPerf.log("navigation_start endpoint=%s paths_updated=%s",
-        OPDSPerf.endpoint(item_url), tostring(paths_updated == true))
     local menu_table = self:genItemTableFromURL(item_url)
     if #menu_table > 0 or self.facet_groups or self.search_url then
         if not paths_updated then
@@ -1110,54 +1048,27 @@ function OPDSBrowser:updateCatalog(item_url, paths_updated)
                 title = self.catalog_title,
             })
         end
-        self.perf_pending_first_paint = {
-            started = navigation_started,
-            source = "navigation",
-            endpoint = OPDSPerf.endpoint(item_url),
-            loaded_rows = #menu_table,
-        }
         self:setCatalogMenu(item_url, menu_table)
 
-        local fill_started = OPDSPerf.start()
-        local rows_before_fill = #self.item_table
         if self.page_num <= 1 then
             -- Request more content, but don't change the page
             self:onNextPage(true)
         end
-        OPDSPerf.log("navigation_fill endpoint=%s rows_before=%d rows_after=%d fill_ms=%.3f",
-            OPDSPerf.endpoint(item_url), rows_before_fill, #self.item_table, OPDSPerf.elapsedMs(fill_started))
-        self.perf_pending_first_paint.loaded_rows = #self.item_table
-        self.perf_pending_first_paint.visible_rows = math.min(#self.item_table, self.perpage or #self.item_table)
         self:saveCatalogSnapshot()
-        OPDSPerf.log("navigation_ready endpoint=%s rows=%d page=%d total_ms=%.3f",
-            OPDSPerf.endpoint(item_url), #self.item_table, self.page, OPDSPerf.elapsedMs(navigation_started))
-    else
-        OPDSPerf.log("navigation_empty endpoint=%s total_ms=%.3f",
-            OPDSPerf.endpoint(item_url), OPDSPerf.elapsedMs(navigation_started))
     end
 end
 
 -- Requests and adds more catalog entries to fill out the page
 function OPDSBrowser:appendCatalog(item_url)
-    local append_started = OPDSPerf.start()
-    local rows_before = #self.item_table
     local menu_table = self:genItemTableFromURL(item_url)
     if #menu_table > 0 then
         for __, item in ipairs(menu_table) do
             table.insert(self.item_table, item)
         end
         self.item_table.hrefs = menu_table.hrefs
-        local layout_started = OPDSPerf.start()
         self:switchItemTable(self.catalog_title, self.item_table, -1)
-        OPDSPerf.log("append_menu_layout rows=%d layout_ms=%.3f", #self.item_table,
-            OPDSPerf.elapsedMs(layout_started))
-        OPDSPerf.log("pagination_fetch endpoint=%s rows_added=%d rows_total=%d total_ms=%.3f",
-            OPDSPerf.endpoint(item_url), #menu_table, #self.item_table,
-            OPDSPerf.elapsedMs(append_started))
         return true
     end
-    OPDSPerf.log("pagination_fetch endpoint=%s rows_added=0 rows_total=%d outcome=empty total_ms=%.3f",
-        OPDSPerf.endpoint(item_url), rows_before, OPDSPerf.elapsedMs(append_started))
 end
 
 -- Shows dialog to search in catalog
@@ -1447,7 +1358,6 @@ function OPDSBrowser:checkDownloadFile(local_path, remote_url, username, passwor
 end
 
 function OPDSBrowser:downloadFile(local_path, remote_url, username, password, caller_callback)
-    local download_started = OPDSPerf.start()
     logger.dbg("Downloading file", local_path, "from", remote_url)
     local code, headers, status
     local parsed = url.parse(remote_url)
@@ -1468,10 +1378,6 @@ function OPDSBrowser:downloadFile(local_path, remote_url, username, password, ca
             text = T(_("Invalid protocol:\n%1"), parsed.scheme),
         })
     end
-    local attributes = lfs.attributes(local_path)
-    OPDSPerf.log("book_download endpoint=%s status=%s bytes=%d total_ms=%.3f",
-        OPDSPerf.endpoint(remote_url), tostring(code or status), attributes and attributes.size or 0,
-        OPDSPerf.elapsedMs(download_started))
     if code == 200 then
         logger.dbg("File downloaded to", local_path)
         if caller_callback then
@@ -1521,11 +1427,7 @@ function OPDSBrowser:onMenuSelect(item)
             end
         else
             self.catalog_title = item.text or self.catalog_title or self.root_catalog_title
-            local selected_started = OPDSPerf.start()
-            OPDSPerf.log("navigation_selected endpoint=%s", OPDSPerf.endpoint(item.url))
             connect_callback = function()
-                OPDSPerf.log("navigation_connected endpoint=%s wait_ms=%.3f",
-                    OPDSPerf.endpoint(item.url), OPDSPerf.elapsedMs(selected_started))
                 self:updateCatalog(item.url)
             end
         end
@@ -1634,25 +1536,11 @@ end
 -- Menu action on next-page chevron tap (request and show more catalog entries)
 function OPDSBrowser:onNextPage(fill_only)
     -- self.page_num comes from menu.lua
-    local pagination_started = OPDSPerf.start()
-    local initial_rows = #self.item_table
-    local fetched_pages = 0
-    if not fill_only then
-        local current_path = self.paths[#self.paths]
-        self.perf_pending_first_paint = {
-            started = pagination_started,
-            source = "pagination",
-            endpoint = OPDSPerf.endpoint(current_path and current_path.url),
-            loaded_rows = #self.item_table,
-            visible_rows = math.min(#self.item_table, self.perpage or #self.item_table),
-        }
-    end
     local page_num = self.page_num
     -- fetch more entries until we fill out one page or reach the end
     while page_num == self.page_num do
         local hrefs = self.item_table.hrefs
         if hrefs and hrefs.next then
-            fetched_pages = fetched_pages + 1
             if not self:appendCatalog(hrefs.next) then
                 break  -- reach end of paging
             end
@@ -1665,9 +1553,6 @@ function OPDSBrowser:onNextPage(fill_only)
         -- We also *do* want to paginate, so call the base class.
         Menu.onNextPage(self)
     end
-    OPDSPerf.log("pagination_fill mode=%s pages_fetched=%d rows_before=%d rows_after=%d total_ms=%.3f",
-        fill_only and "initial" or "user", fetched_pages, initial_rows, #self.item_table,
-        OPDSPerf.elapsedMs(pagination_started))
     return true
 end
 
